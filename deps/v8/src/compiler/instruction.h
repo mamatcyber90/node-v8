@@ -19,13 +19,11 @@
 #include "src/globals.h"
 #include "src/macro-assembler.h"
 #include "src/register-configuration.h"
+#include "src/source-position.h"
 #include "src/zone/zone-allocator.h"
 
 namespace v8 {
 namespace internal {
-
-class SourcePosition;
-
 namespace compiler {
 
 class Schedule;
@@ -903,7 +901,6 @@ class V8_EXPORT_PRIVATE Instruction final {
   bool IsTailCall() const {
     return arch_opcode() == ArchOpcode::kArchTailCallCodeObject ||
            arch_opcode() == ArchOpcode::kArchTailCallCodeObjectFromJSFunction ||
-           arch_opcode() == ArchOpcode::kArchTailCallJSFunctionFromJSFunction ||
            arch_opcode() == ArchOpcode::kArchTailCallAddress;
   }
   bool IsThrow() const {
@@ -1124,16 +1121,16 @@ class StateValueDescriptor {
   StateValueDescriptor()
       : kind_(StateValueKind::kPlain), type_(MachineType::AnyTagged()) {}
 
-  static StateValueDescriptor ArgumentsElements(bool is_rest) {
+  static StateValueDescriptor ArgumentsElements(ArgumentsStateType type) {
     StateValueDescriptor descr(StateValueKind::kArgumentsElements,
                                MachineType::AnyTagged());
-    descr.is_rest_ = is_rest;
+    descr.args_type_ = type;
     return descr;
   }
-  static StateValueDescriptor ArgumentsLength(bool is_rest) {
+  static StateValueDescriptor ArgumentsLength(ArgumentsStateType type) {
     StateValueDescriptor descr(StateValueKind::kArgumentsLength,
                                MachineType::AnyTagged());
-    descr.is_rest_ = is_rest;
+    descr.args_type_ = type;
     return descr;
   }
   static StateValueDescriptor Plain(MachineType type) {
@@ -1172,10 +1169,10 @@ class StateValueDescriptor {
            kind_ == StateValueKind::kNested);
     return id_;
   }
-  int is_rest() const {
+  ArgumentsStateType arguments_type() const {
     DCHECK(kind_ == StateValueKind::kArgumentsElements ||
            kind_ == StateValueKind::kArgumentsLength);
-    return is_rest_;
+    return args_type_;
   }
 
  private:
@@ -1186,7 +1183,7 @@ class StateValueDescriptor {
   MachineType type_;
   union {
     size_t id_;
-    bool is_rest_;
+    ArgumentsStateType args_type_;
   };
 };
 
@@ -1246,11 +1243,11 @@ class StateValueList {
     nested_.push_back(nested);
     return nested;
   }
-  void PushArgumentsElements(bool is_rest) {
-    fields_.push_back(StateValueDescriptor::ArgumentsElements(is_rest));
+  void PushArgumentsElements(ArgumentsStateType type) {
+    fields_.push_back(StateValueDescriptor::ArgumentsElements(type));
   }
-  void PushArgumentsLength(bool is_rest) {
-    fields_.push_back(StateValueDescriptor::ArgumentsLength(is_rest));
+  void PushArgumentsLength(ArgumentsStateType type) {
+    fields_.push_back(StateValueDescriptor::ArgumentsLength(type));
   }
   void PushDuplicate(size_t id) {
     fields_.push_back(StateValueDescriptor::Duplicate(id));

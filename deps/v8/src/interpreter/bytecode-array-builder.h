@@ -79,6 +79,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
   BytecodeArrayBuilder& LoadTheHole();
   BytecodeArrayBuilder& LoadTrue();
   BytecodeArrayBuilder& LoadFalse();
+  BytecodeArrayBuilder& LoadBoolean(bool value);
 
   // Global loads to the accumulator and stores from the accumulator.
   BytecodeArrayBuilder& LoadGlobal(const AstRawString* name, int feedback_slot,
@@ -220,9 +221,16 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
                                             int literal_index, int flags);
   BytecodeArrayBuilder& CreateArrayLiteral(size_t constant_elements_entry,
                                            int literal_index, int flags);
+  BytecodeArrayBuilder& CreateEmptyArrayLiteral(int literal_index);
   BytecodeArrayBuilder& CreateObjectLiteral(size_t constant_properties_entry,
                                             int literal_index, int flags,
                                             Register output);
+  BytecodeArrayBuilder& CreateEmptyObjectLiteral();
+
+  // Gets or creates the template for a TemplateObjectDescription which will
+  // be inserted at constant pool index |template_object_description_entry|.
+  BytecodeArrayBuilder& GetTemplateObject(
+      size_t template_object_description_entry);
 
   // Push the context in accumulator as the new context, and store in register
   // |context|.
@@ -264,7 +272,8 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
   // Call a JS function. The JSFunction or Callable to be called should be in
   // |callable|, the receiver in |args[0]| and the arguments in |args[1]|
   // onwards. The final argument must be a spread.
-  BytecodeArrayBuilder& CallWithSpread(Register callable, RegisterList args);
+  BytecodeArrayBuilder& CallWithSpread(Register callable, RegisterList args,
+                                       int feedback_slot);
 
   // Call the Construct operator. The accumulator holds the |new_target|.
   // The |constructor| is in a register and arguments are in |args|.
@@ -275,7 +284,8 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
   // the |new_target|. The |constructor| is in a register and arguments are in
   // |args|. The final argument must be a spread.
   BytecodeArrayBuilder& ConstructWithSpread(Register constructor,
-                                            RegisterList args);
+                                            RegisterList args,
+                                            int feedback_slot);
 
   // Call the runtime function with |function_id| and arguments |args|.
   BytecodeArrayBuilder& CallRuntime(Runtime::FunctionId function_id,
@@ -299,20 +309,22 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
                                            Register arg,
                                            RegisterList return_pair);
 
-  // Call the JS runtime function with |context_index| and arguments |args|.
+  // Call the JS runtime function with |context_index| and arguments |args|,
+  // with no receiver as it is implicitly set to undefined.
   BytecodeArrayBuilder& CallJSRuntime(int context_index, RegisterList args);
 
   // Operators (register holds the lhs value, accumulator holds the rhs value).
   // Type feedback will be recorded in the |feedback_slot|
   BytecodeArrayBuilder& BinaryOperation(Token::Value binop, Register reg,
                                         int feedback_slot);
+  // Same as above, but lhs in the accumulator and rhs in |literal|.
   BytecodeArrayBuilder& BinaryOperationSmiLiteral(Token::Value binop,
                                                   Smi* literal,
                                                   int feedback_slot);
 
-  // Count Operators (value stored in accumulator).
+  // Unary and Count Operators (value stored in accumulator).
   // Type feedback will be recorded in the |feedback_slot|
-  BytecodeArrayBuilder& CountOperation(Token::Value op, int feedback_slot);
+  BytecodeArrayBuilder& UnaryOperation(Token::Value op, int feedback_slot);
 
   enum class ToBooleanMode {
     kConvertToBoolean,  // Perform ToBoolean conversion on accumulator.
@@ -346,14 +358,9 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
   // Converts accumulator and stores result in register |out|.
   BytecodeArrayBuilder& ToObject(Register out);
   BytecodeArrayBuilder& ToName(Register out);
-  BytecodeArrayBuilder& ToNumber(Register out, int feedback_slot);
 
-  // Converts accumulator to a primitive and then to a string, and stores result
-  // in register |out|.
-  BytecodeArrayBuilder& ToPrimitiveToString(Register out, int feedback_slot);
-  // Concatenate all the string values in |operand_registers| into a string
-  // and store result in the accumulator.
-  BytecodeArrayBuilder& StringConcat(RegisterList operand_registers);
+  // Converts accumulator and stores result back in accumulator.
+  BytecodeArrayBuilder& ToNumber(int feedback_slot);
 
   // Flow Control.
   BytecodeArrayBuilder& Bind(BytecodeLabel* label);
@@ -386,6 +393,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
 
   BytecodeArrayBuilder& Throw();
   BytecodeArrayBuilder& ReThrow();
+  BytecodeArrayBuilder& Abort(BailoutReason reason);
   BytecodeArrayBuilder& Return();
   BytecodeArrayBuilder& ThrowReferenceErrorIfHole(const AstRawString* name);
   BytecodeArrayBuilder& ThrowSuperNotCalledIfHole();
@@ -398,8 +406,9 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
   BytecodeArrayBuilder& IncBlockCounter(int slot);
 
   // Complex flow control.
-  BytecodeArrayBuilder& ForInPrepare(Register receiver,
-                                     RegisterList cache_info_triple);
+  BytecodeArrayBuilder& ForInEnumerate(Register receiver);
+  BytecodeArrayBuilder& ForInPrepare(RegisterList cache_info_triple,
+                                     int feedback_slot);
   BytecodeArrayBuilder& ForInContinue(Register index, Register cache_length);
   BytecodeArrayBuilder& ForInNext(Register receiver, Register index,
                                   RegisterList cache_type_array_pair,
@@ -408,7 +417,8 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
 
   // Generators.
   BytecodeArrayBuilder& SuspendGenerator(Register generator,
-                                         RegisterList registers);
+                                         RegisterList registers,
+                                         int suspend_id);
   BytecodeArrayBuilder& RestoreGeneratorState(Register generator);
   BytecodeArrayBuilder& RestoreGeneratorRegisters(Register generator,
                                                   RegisterList registers);
@@ -533,7 +543,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
   void WriteSwitch(BytecodeNode* node, BytecodeJumpTable* label);
 
   // Not implemented as the illegal bytecode is used inside internally
-  // to indicate a bytecode field is not valid or an error has occured
+  // to indicate a bytecode field is not valid or an error has occurred
   // during bytecode generation.
   BytecodeArrayBuilder& Illegal();
 
@@ -568,8 +578,6 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final
   BytecodeRegisterOptimizer* register_optimizer_;
   BytecodeSourceInfo latest_source_info_;
   BytecodeSourceInfo deferred_source_info_;
-
-  static int const kNoFeedbackSlot = 0;
 
   DISALLOW_COPY_AND_ASSIGN(BytecodeArrayBuilder);
 };

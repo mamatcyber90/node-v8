@@ -54,10 +54,10 @@ FieldAccess AccessBuilder::ForHeapNumberValue() {
 
 
 // static
-FieldAccess AccessBuilder::ForJSObjectProperties() {
+FieldAccess AccessBuilder::ForJSObjectPropertiesOrHash() {
   FieldAccess access = {kTaggedBase,         JSObject::kPropertiesOrHashOffset,
                         MaybeHandle<Name>(), MaybeHandle<Map>(),
-                        Type::Internal(),    MachineType::TaggedPointer(),
+                        Type::Any(),         MachineType::AnyTagged(),
                         kPointerWriteBarrier};
   return access;
 }
@@ -165,21 +165,11 @@ FieldAccess AccessBuilder::ForJSFunctionFeedbackVector() {
 }
 
 // static
-FieldAccess AccessBuilder::ForJSFunctionCodeEntry() {
-  FieldAccess access = {kTaggedBase,           JSFunction::kCodeEntryOffset,
+FieldAccess AccessBuilder::ForJSFunctionCode() {
+  FieldAccess access = {kTaggedBase,           JSFunction::kCodeOffset,
                         Handle<Name>(),        MaybeHandle<Map>(),
-                        Type::OtherInternal(), MachineType::Pointer(),
-                        kNoWriteBarrier};
-  return access;
-}
-
-// static
-FieldAccess AccessBuilder::ForJSFunctionNextFunctionLink() {
-  FieldAccess access = {
-      kTaggedBase,         JSFunction::kNextFunctionLinkOffset,
-      Handle<Name>(),      MaybeHandle<Map>(),
-      Type::Any(),         MachineType::AnyTagged(),
-      kPointerWriteBarrier};
+                        Type::OtherInternal(), MachineType::TaggedPointer(),
+                        kPointerWriteBarrier};
   return access;
 }
 
@@ -427,6 +417,14 @@ FieldAccess AccessBuilder::ForJSIteratorResultValue() {
   return access;
 }
 
+// static
+FieldAccess AccessBuilder::ForJSRegExpData() {
+  FieldAccess access = {kTaggedBase,         JSRegExp::kDataOffset,
+                        MaybeHandle<Name>(), MaybeHandle<Map>(),
+                        Type::NonInternal(), MachineType::AnyTagged(),
+                        kFullWriteBarrier};
+  return access;
+}
 
 // static
 FieldAccess AccessBuilder::ForJSRegExpFlags() {
@@ -437,6 +435,14 @@ FieldAccess AccessBuilder::ForJSRegExpFlags() {
   return access;
 }
 
+// static
+FieldAccess AccessBuilder::ForJSRegExpLastIndex() {
+  FieldAccess access = {kTaggedBase,         JSRegExp::kLastIndexOffset,
+                        MaybeHandle<Name>(), MaybeHandle<Map>(),
+                        Type::NonInternal(), MachineType::AnyTagged(),
+                        kFullWriteBarrier};
+  return access;
+}
 
 // static
 FieldAccess AccessBuilder::ForJSRegExpSource() {
@@ -457,6 +463,16 @@ FieldAccess AccessBuilder::ForFixedArrayLength() {
                         TypeCache::Get().kFixedArrayLengthType,
                         MachineType::TaggedSigned(),
                         kNoWriteBarrier};
+  return access;
+}
+
+// static
+FieldAccess AccessBuilder::ForPropertyArrayLengthAndHash() {
+  FieldAccess access = {
+      kTaggedBase,         PropertyArray::kLengthAndHashOffset,
+      MaybeHandle<Name>(), MaybeHandle<Map>(),
+      Type::SignedSmall(), MachineType::TaggedSigned(),
+      kNoWriteBarrier};
   return access;
 }
 
@@ -483,26 +499,14 @@ FieldAccess AccessBuilder::ForFixedTypedArrayBaseExternalPointer() {
 }
 
 // static
-FieldAccess AccessBuilder::ForDescriptorArrayEnumCacheBridge() {
+FieldAccess AccessBuilder::ForDescriptorArrayEnumCache() {
   FieldAccess access = {
-      kTaggedBase,           DescriptorArray::kEnumCacheBridgeOffset,
+      kTaggedBase,           DescriptorArray::kEnumCacheOffset,
       Handle<Name>(),        MaybeHandle<Map>(),
       Type::OtherInternal(), MachineType::TaggedPointer(),
       kPointerWriteBarrier};
   return access;
 }
-
-
-// static
-FieldAccess AccessBuilder::ForDescriptorArrayEnumCacheBridgeCache() {
-  FieldAccess access = {
-      kTaggedBase,           DescriptorArray::kEnumCacheBridgeCacheOffset,
-      Handle<Name>(),        MaybeHandle<Map>(),
-      Type::OtherInternal(), MachineType::TaggedPointer(),
-      kPointerWriteBarrier};
-  return access;
-}
-
 
 // static
 FieldAccess AccessBuilder::ForMapBitField() {
@@ -914,6 +918,23 @@ ElementAccess AccessBuilder::ForFixedDoubleArrayElement() {
   return access;
 }
 
+// static
+FieldAccess AccessBuilder::ForEnumCacheKeys() {
+  FieldAccess access = {kTaggedBase,           EnumCache::kKeysOffset,
+                        MaybeHandle<Name>(),   MaybeHandle<Map>(),
+                        Type::OtherInternal(), MachineType::TaggedPointer(),
+                        kPointerWriteBarrier};
+  return access;
+}
+
+// static
+FieldAccess AccessBuilder::ForEnumCacheIndices() {
+  FieldAccess access = {kTaggedBase,           EnumCache::kIndicesOffset,
+                        MaybeHandle<Name>(),   MaybeHandle<Map>(),
+                        Type::OtherInternal(), MachineType::TaggedPointer(),
+                        kPointerWriteBarrier};
+  return access;
+}
 
 // static
 ElementAccess AccessBuilder::ForTypedArrayElement(ExternalArrayType type,
@@ -964,9 +985,6 @@ ElementAccess AccessBuilder::ForTypedArrayElement(ExternalArrayType type,
     }
   }
   UNREACHABLE();
-  ElementAccess access = {kUntaggedBase, 0, Type::None(), MachineType::None(),
-                          kNoWriteBarrier};
-  return access;
 }
 
 // static
@@ -1078,6 +1096,19 @@ FieldAccess AccessBuilder::ForDictionaryNextEnumerationIndex() {
   FieldAccess access = {
       kTaggedBase,
       FixedArray::OffsetOfElementAt(NameDictionary::kNextEnumerationIndexIndex),
+      MaybeHandle<Name>(),
+      MaybeHandle<Map>(),
+      Type::SignedSmall(),
+      MachineType::TaggedSigned(),
+      kNoWriteBarrier};
+  return access;
+}
+
+// static
+FieldAccess AccessBuilder::ForDictionaryObjectHashIndex() {
+  FieldAccess access = {
+      kTaggedBase,
+      FixedArray::OffsetOfElementAt(NameDictionary::kObjectHashIndex),
       MaybeHandle<Name>(),
       MaybeHandle<Map>(),
       Type::SignedSmall(),

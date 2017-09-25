@@ -9,7 +9,7 @@
 
 #include "src/base/platform/platform.h"
 #include "src/counters-inl.h"
-#include "src/feedback-vector-inl.h"
+#include "src/feedback-vector.h"
 #include "src/heap/heap.h"
 #include "src/heap/incremental-marking-inl.h"
 #include "src/heap/mark-compact.h"
@@ -381,10 +381,6 @@ void Heap::FinalizeExternalString(String* string) {
 
 Address Heap::NewSpaceTop() { return new_space_->top(); }
 
-bool Heap::DeoptMaybeTenuredAllocationSites() {
-  return new_space_->IsAtMaximumCapacity() && maximum_size_scavenges_ == 0;
-}
-
 bool Heap::InNewSpace(Object* object) {
   // Inlined check from NewSpace::Contains.
   bool result =
@@ -426,11 +422,11 @@ bool Heap::ShouldBePromoted(Address old_address) {
          (!page->ContainsLimit(age_mark) || old_address < age_mark);
 }
 
-void Heap::RecordWrite(Object* object, int offset, Object* o) {
-  if (!InNewSpace(o) || !object->IsHeapObject() || InNewSpace(object)) {
+void Heap::RecordWrite(Object* object, Object** slot, Object* value) {
+  if (!InNewSpace(value) || !object->IsHeapObject() || InNewSpace(object)) {
     return;
   }
-  store_buffer()->InsertEntry(HeapObject::cast(object)->address() + offset);
+  store_buffer()->InsertEntry(reinterpret_cast<Address>(slot));
 }
 
 void Heap::RecordWriteIntoCode(Code* host, RelocInfo* rinfo, Object* value) {
@@ -518,9 +514,9 @@ AllocationMemento* Heap::FindAllocationMemento(Map* map, HeapObject* object) {
   UNREACHABLE();
 }
 
-template <Heap::UpdateAllocationSiteMode mode>
 void Heap::UpdateAllocationSite(Map* map, HeapObject* object,
-                                base::HashMap* pretenuring_feedback) {
+                                PretenuringFeedbackMap* pretenuring_feedback) {
+  DCHECK_NE(pretenuring_feedback, &global_pretenuring_feedback_);
   DCHECK(InFromSpace(object) ||
          (InToSpace(object) &&
           Page::FromAddress(object->address())
@@ -535,37 +531,11 @@ void Heap::UpdateAllocationSite(Map* map, HeapObject* object,
       FindAllocationMemento<kForGC>(map, object);
   if (memento_candidate == nullptr) return;
 
-  if (mode == kGlobal) {
-    DCHECK_EQ(pretenuring_feedback, global_pretenuring_feedback_);
-    // Entering global pretenuring feedback is only used in the scavenger, where
-    // we are allowed to actually touch the allocation site.
-    if (!memento_candidate->IsValid()) return;
-    AllocationSite* site = memento_candidate->GetAllocationSite();
-    DCHECK(!site->IsZombie());
-    // For inserting in the global pretenuring storage we need to first
-    // increment the memento found count on the allocation site.
-    if (site->IncrementMementoFoundCount()) {
-      global_pretenuring_feedback_->LookupOrInsert(site,
-                                                   ObjectHash(site->address()));
-    }
-  } else {
-    DCHECK_EQ(mode, kCached);
-    DCHECK_NE(pretenuring_feedback, global_pretenuring_feedback_);
-    // Entering cached feedback is used in the parallel case. We are not allowed
-    // to dereference the allocation site and rather have to postpone all checks
-    // till actually merging the data.
-    Address key = memento_candidate->GetAllocationSiteUnchecked();
-    base::HashMap::Entry* e =
-        pretenuring_feedback->LookupOrInsert(key, ObjectHash(key));
-    DCHECK(e != nullptr);
-    (*bit_cast<intptr_t*>(&e->value))++;
-  }
-}
-
-
-void Heap::RemoveAllocationSitePretenuringFeedback(AllocationSite* site) {
-  global_pretenuring_feedback_->Remove(
-      site, static_cast<uint32_t>(bit_cast<uintptr_t>(site)));
+  // Entering cached feedback is used in the parallel case. We are not allowed
+  // to dereference the allocation site and rather have to postpone all checks
+  // till actually merging the data.
+  Address key = memento_candidate->GetAllocationSiteUnchecked();
+  (*pretenuring_feedback)[reinterpret_cast<AllocationSite*>(key)]++;
 }
 
 Isolate* Heap::isolate() {
@@ -574,70 +544,13 @@ Isolate* Heap::isolate() {
       reinterpret_cast<size_t>(reinterpret_cast<Isolate*>(16)->heap()) + 16);
 }
 
-void Heap::ExternalStringTable::PromoteAllNewSpaceStrings() {
-  old_space_strings_.AddAll(new_space_strings_);
-  new_space_strings_.Clear();
-}
-
 void Heap::ExternalStringTable::AddString(String* string) {
   DCHECK(string->IsExternalString());
   if (heap_->InNewSpace(string)) {
-    new_space_strings_.Add(string);
+    new_space_strings_.push_back(string);
   } else {
-    old_space_strings_.Add(string);
+    old_space_strings_.push_back(string);
   }
-}
-
-void Heap::ExternalStringTable::IterateNewSpaceStrings(RootVisitor* v) {
-  if (!new_space_strings_.is_empty()) {
-    Object** start = &new_space_strings_[0];
-    v->VisitRootPointers(Root::kExternalStringsTable, start,
-                         start + new_space_strings_.length());
-  }
-}
-
-void Heap::ExternalStringTable::IterateAll(RootVisitor* v) {
-  IterateNewSpaceStrings(v);
-  if (!old_space_strings_.is_empty()) {
-    Object** start = &old_space_strings_[0];
-    v->VisitRootPointers(Root::kExternalStringsTable, start,
-                         start + old_space_strings_.length());
-  }
-}
-
-
-// Verify() is inline to avoid ifdef-s around its calls in release
-// mode.
-void Heap::ExternalStringTable::Verify() {
-#ifdef DEBUG
-  for (int i = 0; i < new_space_strings_.length(); ++i) {
-    Object* obj = Object::cast(new_space_strings_[i]);
-    DCHECK(heap_->InNewSpace(obj));
-    DCHECK(!obj->IsTheHole(heap_->isolate()));
-  }
-  for (int i = 0; i < old_space_strings_.length(); ++i) {
-    Object* obj = Object::cast(old_space_strings_[i]);
-    DCHECK(!heap_->InNewSpace(obj));
-    DCHECK(!obj->IsTheHole(heap_->isolate()));
-  }
-#endif
-}
-
-
-void Heap::ExternalStringTable::AddOldString(String* string) {
-  DCHECK(string->IsExternalString());
-  DCHECK(!heap_->InNewSpace(string));
-  old_space_strings_.Add(string);
-}
-
-
-void Heap::ExternalStringTable::ShrinkNewStrings(int position) {
-  new_space_strings_.Rewind(position);
-#ifdef VERIFY_HEAP
-  if (FLAG_verify_heap) {
-    Verify();
-  }
-#endif
 }
 
 Oddball* Heap::ToBoolean(bool condition) {
@@ -662,68 +575,10 @@ int Heap::NextScriptId() {
   return last_id;
 }
 
-void Heap::SetArgumentsAdaptorDeoptPCOffset(int pc_offset) {
-  DCHECK(arguments_adaptor_deopt_pc_offset() == Smi::kZero);
-  set_arguments_adaptor_deopt_pc_offset(Smi::FromInt(pc_offset));
-}
-
-void Heap::SetConstructStubCreateDeoptPCOffset(int pc_offset) {
-  // TODO(tebbi): Remove second half of DCHECK once
-  // FLAG_harmony_restrict_constructor_return is gone.
-  DCHECK(construct_stub_create_deopt_pc_offset() == Smi::kZero ||
-         construct_stub_create_deopt_pc_offset() == Smi::FromInt(pc_offset));
-  set_construct_stub_create_deopt_pc_offset(Smi::FromInt(pc_offset));
-}
-
-void Heap::SetConstructStubInvokeDeoptPCOffset(int pc_offset) {
-  // TODO(tebbi): Remove second half of DCHECK once
-  // FLAG_harmony_restrict_constructor_return is gone.
-  DCHECK(construct_stub_invoke_deopt_pc_offset() == Smi::kZero ||
-         construct_stub_invoke_deopt_pc_offset() == Smi::FromInt(pc_offset));
-  set_construct_stub_invoke_deopt_pc_offset(Smi::FromInt(pc_offset));
-}
-
-void Heap::SetGetterStubDeoptPCOffset(int pc_offset) {
-  DCHECK(getter_stub_deopt_pc_offset() == Smi::kZero);
-  set_getter_stub_deopt_pc_offset(Smi::FromInt(pc_offset));
-}
-
-void Heap::SetSetterStubDeoptPCOffset(int pc_offset) {
-  DCHECK(setter_stub_deopt_pc_offset() == Smi::kZero);
-  set_setter_stub_deopt_pc_offset(Smi::FromInt(pc_offset));
-}
-
-void Heap::SetInterpreterEntryReturnPCOffset(int pc_offset) {
-  DCHECK(interpreter_entry_return_pc_offset() == Smi::kZero);
-  set_interpreter_entry_return_pc_offset(Smi::FromInt(pc_offset));
-}
-
 int Heap::GetNextTemplateSerialNumber() {
   int next_serial_number = next_template_serial_number()->value() + 1;
   set_next_template_serial_number(Smi::FromInt(next_serial_number));
   return next_serial_number;
-}
-
-void Heap::SetSerializedTemplates(FixedArray* templates) {
-  DCHECK_EQ(empty_fixed_array(), serialized_templates());
-  DCHECK(isolate()->serializer_enabled());
-  set_serialized_templates(templates);
-}
-
-void Heap::SetSerializedGlobalProxySizes(FixedArray* sizes) {
-  DCHECK_EQ(empty_fixed_array(), serialized_global_proxy_sizes());
-  DCHECK(isolate()->serializer_enabled());
-  set_serialized_global_proxy_sizes(sizes);
-}
-
-void Heap::CreateObjectStats() {
-  if (V8_LIKELY(FLAG_gc_stats == 0)) return;
-  if (!live_object_stats_) {
-    live_object_stats_ = new ObjectStats(this);
-  }
-  if (!dead_object_stats_) {
-    dead_object_stats_ = new ObjectStats(this);
-  }
 }
 
 AlwaysAllocateScope::AlwaysAllocateScope(Isolate* isolate)

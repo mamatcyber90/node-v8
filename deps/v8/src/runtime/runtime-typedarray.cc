@@ -55,17 +55,15 @@ RUNTIME_FUNCTION(Runtime_ArrayBufferNeuter) {
 RUNTIME_FUNCTION(Runtime_TypedArrayCopyElements) {
   HandleScope scope(isolate);
   DCHECK_EQ(3, args.length());
-  CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, destination, 0);
+  CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, target, 0);
   CONVERT_ARG_HANDLE_CHECKED(JSReceiver, source, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(length_obj, 2);
 
   size_t length;
   CHECK(TryNumberToSize(*length_obj, &length));
 
-  Handle<JSTypedArray> destination_ta = Handle<JSTypedArray>::cast(destination);
-
-  ElementsAccessor* accessor = destination_ta->GetElementsAccessor();
-  return accessor->CopyElements(source, destination, length);
+  ElementsAccessor* accessor = target->GetElementsAccessor();
+  return accessor->CopyElements(source, target, length);
 }
 
 #define BUFFER_VIEW_GETTER(Type, getter, accessor)   \
@@ -95,81 +93,6 @@ RUNTIME_FUNCTION(Runtime_TypedArrayGetBuffer) {
   return *holder->GetBuffer();
 }
 
-
-// Return codes for Runtime_TypedArraySetFastCases.
-// Should be synchronized with typedarray.js natives.
-enum TypedArraySetResultCodes {
-  // Set from typed array of the same type.
-  // This is processed by TypedArraySetFastCases
-  TYPED_ARRAY_SET_TYPED_ARRAY_SAME_TYPE = 0,
-  // Set from typed array of the different type, overlapping in memory.
-  TYPED_ARRAY_SET_TYPED_ARRAY_OVERLAPPING = 1,
-  // Set from typed array of the different type, non-overlapping.
-  TYPED_ARRAY_SET_TYPED_ARRAY_NONOVERLAPPING = 2,
-  // Set from non-typed array.
-  TYPED_ARRAY_SET_NON_TYPED_ARRAY = 3
-};
-
-
-RUNTIME_FUNCTION(Runtime_TypedArraySetFastCases) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-  if (!args[0]->IsJSTypedArray()) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewTypeError(MessageTemplate::kNotTypedArray));
-  }
-
-  if (!args[1]->IsJSTypedArray()) {
-    return Smi::FromInt(TYPED_ARRAY_SET_NON_TYPED_ARRAY);
-  }
-
-  CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, target_obj, 0);
-  CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, source_obj, 1);
-  CONVERT_NUMBER_ARG_HANDLE_CHECKED(offset_obj, 2);
-
-  Handle<JSTypedArray> target(JSTypedArray::cast(*target_obj));
-  Handle<JSTypedArray> source(JSTypedArray::cast(*source_obj));
-  size_t offset = 0;
-  CHECK(TryNumberToSize(*offset_obj, &offset));
-  size_t target_length = target->length_value();
-  size_t source_length = source->length_value();
-  size_t target_byte_length = NumberToSize(target->byte_length());
-  size_t source_byte_length = NumberToSize(source->byte_length());
-  if (offset > target_length || offset + source_length > target_length ||
-      offset + source_length < offset) {  // overflow
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError(MessageTemplate::kTypedArraySetSourceTooLarge));
-  }
-
-  size_t target_offset = NumberToSize(target->byte_offset());
-  size_t source_offset = NumberToSize(source->byte_offset());
-  uint8_t* target_base =
-      static_cast<uint8_t*>(target->GetBuffer()->backing_store()) +
-      target_offset;
-  uint8_t* source_base =
-      static_cast<uint8_t*>(source->GetBuffer()->backing_store()) +
-      source_offset;
-
-  // Typed arrays of the same type: use memmove.
-  if (target->type() == source->type()) {
-    memmove(target_base + offset * target->element_size(), source_base,
-            source_byte_length);
-    return Smi::FromInt(TYPED_ARRAY_SET_TYPED_ARRAY_SAME_TYPE);
-  }
-
-  // Typed arrays of different types over the same backing store
-  if ((source_base <= target_base &&
-       source_base + source_byte_length > target_base) ||
-      (target_base <= source_base &&
-       target_base + target_byte_length > source_base)) {
-    // We do not support overlapping ArrayBuffers
-    DCHECK(target->GetBuffer()->backing_store() ==
-           source->GetBuffer()->backing_store());
-    return Smi::FromInt(TYPED_ARRAY_SET_TYPED_ARRAY_OVERLAPPING);
-  } else {  // Non-overlapping typed arrays
-    return Smi::FromInt(TYPED_ARRAY_SET_TYPED_ARRAY_NONOVERLAPPING);
-  }
-}
 
 namespace {
 
@@ -232,14 +155,6 @@ RUNTIME_FUNCTION(Runtime_TypedArraySortFast) {
 
   return *array;
 }
-
-RUNTIME_FUNCTION(Runtime_TypedArrayMaxSizeInHeap) {
-  DCHECK_EQ(0, args.length());
-  DCHECK_OBJECT_SIZE(FLAG_typed_array_max_size_in_heap +
-                     FixedTypedArrayBase::kDataOffset);
-  return Smi::FromInt(FLAG_typed_array_max_size_in_heap);
-}
-
 
 RUNTIME_FUNCTION(Runtime_IsTypedArray) {
   HandleScope scope(isolate);

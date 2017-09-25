@@ -12,6 +12,7 @@
 #include "src/globals.h"
 #include "src/machine-type.h"
 #include "src/zone/zone-containers.h"
+#include "src/zone/zone-handle-set.h"
 
 namespace v8 {
 namespace internal {
@@ -122,6 +123,23 @@ std::ostream& operator<<(std::ostream&, ParameterInfo const&);
 
 V8_EXPORT_PRIVATE int ParameterIndexOf(const Operator* const);
 const ParameterInfo& ParameterInfoOf(const Operator* const);
+
+struct ObjectStateInfo final : std::pair<uint32_t, int> {
+  using std::pair<uint32_t, int>::pair;
+  uint32_t object_id() const { return first; }
+  int size() const { return second; }
+};
+std::ostream& operator<<(std::ostream&, ObjectStateInfo const&);
+size_t hash_value(ObjectStateInfo const& p);
+
+struct TypedObjectStateInfo final
+    : std::pair<uint32_t, const ZoneVector<MachineType>*> {
+  using std::pair<uint32_t, const ZoneVector<MachineType>*>::pair;
+  uint32_t object_id() const { return first; }
+  const ZoneVector<MachineType>* machine_types() const { return second; }
+};
+std::ostream& operator<<(std::ostream&, TypedObjectStateInfo const&);
+size_t hash_value(TypedObjectStateInfo const& p);
 
 class RelocatablePtrConstantInfo final {
  public:
@@ -282,6 +300,8 @@ RegionObservability RegionObservabilityOf(Operator const*) WARN_UNUSED_RESULT;
 std::ostream& operator<<(std::ostream& os,
                          const ZoneVector<MachineType>* types);
 
+ZoneHandleSet<Map> MapGuardMapsOf(Operator const*) WARN_UNUSED_RESULT;
+
 Type* TypeGuardTypeOf(Operator const*) WARN_UNUSED_RESULT;
 
 int OsrValueIndexOf(Operator const*);
@@ -291,10 +311,30 @@ SparseInputMask SparseInputMaskOf(Operator const*);
 ZoneVector<MachineType> const* MachineTypesOf(Operator const*)
     WARN_UNUSED_RESULT;
 
-// The ArgumentsElementsState and ArgumentsLengthState can either describe an
-// unmapped arguments backing store or the backing store of the rest parameters.
-// IsRestOf(op) is true in the second case.
-bool IsRestOf(Operator const*);
+// The ArgumentsElementsState and ArgumentsLengthState can describe the layout
+// for backing stores of arguments objects of various types:
+//
+//                        +------------------------------------+
+//  - kUnmappedArguments: | arg0, ... argK-1, argK, ... argN-1 |  {length:N}
+//                        +------------------------------------+
+//                        +------------------------------------+
+//  - kMappedArguments:   | hole, ...   hole, argK, ... argN-1 |  {length:N}
+//                        +------------------------------------+
+//                                          +------------------+
+//  - kRestParameter:                       | argK, ... argN-1 |  {length:N-K}
+//                                          +------------------+
+//
+// Here {K} represents the number for formal parameters of the active function,
+// whereas {N} represents the actual number of arguments passed at runtime.
+// Note that {N < K} can happen and causes {K} to be capped accordingly.
+//
+// Also note that it is possible for an arguments object of {kMappedArguments}
+// type to carry a backing store of {kUnappedArguments} type when {K == 0}.
+typedef CreateArgumentsType ArgumentsStateType;
+
+ArgumentsStateType ArgumentsStateTypeOf(Operator const*) WARN_UNUSED_RESULT;
+
+uint32_t ObjectIdOf(Operator const*);
 
 // Interface for building common operators that can be used at any level of IR,
 // including JavaScript, mid-level, and low-level.
@@ -340,6 +380,7 @@ class V8_EXPORT_PRIVATE CommonOperatorBuilder final
   const Operator* NumberConstant(volatile double);
   const Operator* PointerConstant(intptr_t);
   const Operator* HeapConstant(const Handle<HeapObject>&);
+  const Operator* ObjectId(uint32_t);
 
   const Operator* RelocatableInt32Constant(int32_t value,
                                            RelocInfo::Mode rmode);
@@ -360,17 +401,21 @@ class V8_EXPORT_PRIVATE CommonOperatorBuilder final
   const Operator* StateValues(int arguments, SparseInputMask bitmask);
   const Operator* TypedStateValues(const ZoneVector<MachineType>* types,
                                    SparseInputMask bitmask);
-  const Operator* ArgumentsElementsState(bool is_rest);
-  const Operator* ArgumentsLengthState(bool is_rest);
-  const Operator* ObjectState(int pointer_slots);
-  const Operator* TypedObjectState(const ZoneVector<MachineType>* types);
+  const Operator* ArgumentsElementsState(ArgumentsStateType type);
+  const Operator* ArgumentsLengthState(ArgumentsStateType type);
+  const Operator* ObjectState(int object_id, int pointer_slots);
+  const Operator* TypedObjectState(int object_id,
+                                   const ZoneVector<MachineType>* types);
   const Operator* FrameState(BailoutId bailout_id,
                              OutputFrameStateCombine state_combine,
                              const FrameStateFunctionInfo* function_info);
   const Operator* Call(const CallDescriptor* descriptor);
+  const Operator* CallWithCallerSavedRegisters(
+      const CallDescriptor* descriptor);
   const Operator* TailCall(const CallDescriptor* descriptor);
   const Operator* Projection(size_t index);
   const Operator* Retain();
+  const Operator* MapGuard(ZoneHandleSet<Map> maps);
   const Operator* TypeGuard(Type* type);
 
   // Constructs a new merge or phi operator with the same opcode as {op}, but

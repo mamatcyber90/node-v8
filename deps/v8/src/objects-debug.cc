@@ -13,9 +13,10 @@
 #include "src/layout-descriptor.h"
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
+#include "src/objects/bigint-inl.h"
 #include "src/objects/debug-objects-inl.h"
 #include "src/objects/literal-objects.h"
-#include "src/objects/module-info.h"
+#include "src/objects/module.h"
 #include "src/ostreams.h"
 #include "src/regexp/jsregexp.h"
 #include "src/transitions.h"
@@ -72,6 +73,10 @@ void HeapObject::HeapObjectVerify() {
     case MUTABLE_HEAP_NUMBER_TYPE:
       HeapNumber::cast(this)->HeapNumberVerify();
       break;
+    case BIGINT_TYPE:
+      BigInt::cast(this)->BigIntVerify();
+      break;
+    case HASH_TABLE_TYPE:
     case FIXED_ARRAY_TYPE:
       FixedArray::cast(this)->FixedArrayVerify();
       break;
@@ -92,6 +97,9 @@ void HeapObject::HeapObjectVerify() {
       break;
     case FREE_SPACE_TYPE:
       FreeSpace::cast(this)->FreeSpaceVerify();
+      break;
+    case FEEDBACK_VECTOR_TYPE:
+      FeedbackVector::cast(this)->FeedbackVectorVerify();
       break;
 
 #define VERIFY_TYPED_ARRAY(Type, type, TYPE, ctype, size)                      \
@@ -177,41 +185,9 @@ void HeapObject::HeapObjectVerify() {
       JSMapIterator::cast(this)->JSMapIteratorVerify();
       break;
 
-    case JS_TYPED_ARRAY_KEY_ITERATOR_TYPE:
-    case JS_FAST_ARRAY_KEY_ITERATOR_TYPE:
-    case JS_GENERIC_ARRAY_KEY_ITERATOR_TYPE:
-    case JS_UINT8_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_INT8_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_UINT16_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_INT16_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_UINT32_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_INT32_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_FLOAT32_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_FLOAT64_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_UINT8_CLAMPED_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_HOLEY_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_SMI_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_HOLEY_SMI_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_DOUBLE_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_HOLEY_DOUBLE_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_GENERIC_ARRAY_KEY_VALUE_ITERATOR_TYPE:
-    case JS_UINT8_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_INT8_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_UINT16_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_INT16_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_UINT32_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_INT32_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_FLOAT32_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_FLOAT64_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_UINT8_CLAMPED_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_HOLEY_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_SMI_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_HOLEY_SMI_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_DOUBLE_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_FAST_HOLEY_DOUBLE_ARRAY_VALUE_ITERATOR_TYPE:
-    case JS_GENERIC_ARRAY_VALUE_ITERATOR_TYPE:
+#define ARRAY_ITERATOR_CASE(type) case type:
+      ARRAY_ITERATOR_TYPE_LIST(ARRAY_ITERATOR_CASE)
+#undef ARRAY_ITERATOR_CASE
       JSArrayIterator::cast(this)->JSArrayIteratorVerify();
       break;
 
@@ -226,9 +202,6 @@ void HeapObject::HeapObjectVerify() {
       break;
     case JS_WEAK_SET_TYPE:
       JSWeakSet::cast(this)->JSWeakSetVerify();
-      break;
-    case JS_PROMISE_CAPABILITY_TYPE:
-      JSPromiseCapability::cast(this)->JSPromiseCapabilityVerify();
       break;
     case JS_PROMISE_TYPE:
       JSPromise::cast(this)->JSPromiseVerify();
@@ -320,6 +293,7 @@ void FreeSpace::FreeSpaceVerify() {
   CHECK(IsFreeSpace());
 }
 
+void FeedbackVector::FeedbackVectorVerify() { CHECK(IsFeedbackVector()); }
 
 template <class Traits>
 void FixedTypedArray<Traits>::FixedTypedArrayVerify() {
@@ -390,16 +364,21 @@ void JSObject::JSObjectVerify() {
         if (r.IsNone()) {
           CHECK(type_is_none);
         } else if (!type_is_any && !(type_is_none && r.IsHeapObject())) {
-          // If allocation folding is off then GC could happen during inner
-          // object literal creation and we will end up having and undefined
-          // value that does not match the field type.
-          CHECK(!field_type->NowStable() || field_type->NowContains(value) ||
-                (!FLAG_use_allocation_folding && value->IsUndefined(isolate)));
+          CHECK(!field_type->NowStable() || field_type->NowContains(value));
         }
         CHECK_IMPLIES(is_transitionable_fast_elements_kind,
                       !Map::IsInplaceGeneralizableField(details.constness(), r,
                                                         field_type));
       }
+    }
+
+    if (map()->EnumLength() != kInvalidEnumCacheSentinel) {
+      EnumCache* enum_cache = descriptors->GetEnumCache();
+      FixedArray* keys = enum_cache->keys();
+      FixedArray* indices = enum_cache->indices();
+      CHECK_LE(map()->EnumLength(), keys->length());
+      CHECK_IMPLIES(indices != isolate->heap()->empty_fixed_array(),
+                    keys->length() == indices->length());
     }
   }
 
@@ -428,32 +407,34 @@ void Map::MapVerify() {
   VerifyHeapPointer(prototype());
   VerifyHeapPointer(instance_descriptors());
   SLOW_DCHECK(instance_descriptors()->IsSortedNoDuplicates());
-  SLOW_DCHECK(TransitionArray::IsSortedNoDuplicates(this));
-  SLOW_DCHECK(TransitionArray::IsConsistentWithBackPointers(this));
-  // TODO(ishell): turn it back to SLOW_DCHECK.
-  CHECK(!FLAG_unbox_double_fields ||
-        layout_descriptor()->IsConsistentWithMap(this));
+  DisallowHeapAllocation no_gc;
+  SLOW_DCHECK(TransitionsAccessor(this, &no_gc).IsSortedNoDuplicates());
+  SLOW_DCHECK(TransitionsAccessor(this, &no_gc).IsConsistentWithBackPointers());
+  SLOW_DCHECK(!FLAG_unbox_double_fields ||
+              layout_descriptor()->IsConsistentWithMap(this));
+  if (!may_have_interesting_symbols()) {
+    CHECK(!has_named_interceptor());
+    CHECK(!is_dictionary_map());
+    CHECK(!is_access_check_needed());
+    DescriptorArray* const descriptors = instance_descriptors();
+    for (int i = 0; i < NumberOfOwnDescriptors(); ++i) {
+      CHECK(!descriptors->GetKey(i)->IsInterestingSymbol());
+    }
+  }
+  CHECK_IMPLIES(has_named_interceptor(), may_have_interesting_symbols());
+  CHECK_IMPLIES(is_dictionary_map(), may_have_interesting_symbols());
+  CHECK_IMPLIES(is_access_check_needed(), may_have_interesting_symbols());
 }
 
 
 void Map::DictionaryMapVerify() {
   MapVerify();
   CHECK(is_dictionary_map());
-  CHECK(instance_descriptors()->IsEmpty());
+  CHECK_EQ(kInvalidEnumCacheSentinel, EnumLength());
+  CHECK_EQ(GetHeap()->empty_descriptor_array(), instance_descriptors());
   CHECK_EQ(0, unused_property_fields());
   CHECK_EQ(Map::GetVisitorId(this), visitor_id());
 }
-
-
-void Map::VerifyOmittedMapChecks() {
-  if (!FLAG_omit_map_checks_for_leaf_maps) return;
-  if (!is_stable() ||
-      is_deprecated() ||
-      is_dictionary_map()) {
-    CHECK(dependent_code()->IsEmpty(DependentCode::kPrototypeCheckGroup));
-  }
-}
-
 
 void AliasedArgumentsEntry::AliasedArgumentsEntryVerify() {
   VerifySmiField(kAliasedContextSlot);
@@ -464,6 +445,13 @@ void FixedArray::FixedArrayVerify() {
   for (int i = 0; i < length(); i++) {
     Object* e = get(i);
     VerifyPointer(e);
+  }
+  Heap* heap = GetHeap();
+  if (this == heap->empty_descriptor_array()) {
+    DescriptorArray* descriptors = DescriptorArray::cast(this);
+    CHECK_EQ(2, length());
+    CHECK_EQ(0, descriptors->number_of_descriptors());
+    CHECK_EQ(heap->empty_enum_cache(), descriptors->GetEnumCache());
   }
 }
 
@@ -496,35 +484,29 @@ void TransitionArray::TransitionArrayVerify() {
     VerifyPointer(e);
   }
   CHECK_LE(LengthFor(number_of_transitions()), length());
-  CHECK(next_link()->IsUndefined(GetIsolate()) || next_link()->IsSmi() ||
-        next_link()->IsTransitionArray());
 }
 
 void JSArgumentsObject::JSArgumentsObjectVerify() {
   if (IsSloppyArgumentsElementsKind(GetElementsKind())) {
-    JSSloppyArgumentsObject::cast(this)->JSSloppyArgumentsObjectVerify();
+    SloppyArgumentsElements::cast(elements())
+        ->SloppyArgumentsElementsVerify(this);
   }
-  JSObjectVerify();
-}
-
-void JSSloppyArgumentsObject::JSSloppyArgumentsObjectVerify() {
   Isolate* isolate = GetIsolate();
   if (isolate->IsInAnyContext(map(), Context::SLOPPY_ARGUMENTS_MAP_INDEX) ||
       isolate->IsInAnyContext(map(),
                               Context::SLOW_ALIASED_ARGUMENTS_MAP_INDEX) ||
       isolate->IsInAnyContext(map(),
                               Context::FAST_ALIASED_ARGUMENTS_MAP_INDEX)) {
-    VerifyObjectField(kLengthOffset);
-    VerifyObjectField(kCalleeOffset);
+    VerifyObjectField(JSSloppyArgumentsObject::kLengthOffset);
+    VerifyObjectField(JSSloppyArgumentsObject::kCalleeOffset);
+  } else if (isolate->IsInAnyContext(map(),
+                                     Context::STRICT_ARGUMENTS_MAP_INDEX)) {
+    VerifyObjectField(JSStrictArgumentsObject::kLengthOffset);
   }
-  ElementsKind kind = GetElementsKind();
-  CHECK(IsSloppyArgumentsElementsKind(kind));
-  SloppyArgumentsElements::cast(elements())
-      ->SloppyArgumentsElementsVerify(this);
+  JSObjectVerify();
 }
 
-void SloppyArgumentsElements::SloppyArgumentsElementsVerify(
-    JSSloppyArgumentsObject* holder) {
+void SloppyArgumentsElements::SloppyArgumentsElementsVerify(JSObject* holder) {
   Isolate* isolate = GetIsolate();
   FixedArrayVerify();
   // Abort verification if only partially initialized (can't use arguments()
@@ -681,7 +663,9 @@ void String::StringVerify() {
 
 
 void ConsString::ConsStringVerify() {
-  CHECK(this->first()->IsString() && this->second()->IsString());
+  CHECK(this->first()->IsString());
+  CHECK(this->second() == GetHeap()->empty_string() ||
+        this->second()->IsString());
   CHECK(this->length() >= ConsString::kMinLength);
   CHECK(this->length() == this->first()->length() + this->second()->length());
   if (this->IsFlat()) {
@@ -722,11 +706,7 @@ void JSBoundFunction::JSBoundFunctionVerify() {
 void JSFunction::JSFunctionVerify() {
   CHECK(IsJSFunction());
   VerifyObjectField(kPrototypeOrInitialMapOffset);
-  VerifyObjectField(kNextFunctionLinkOffset);
   CHECK(code()->IsCode());
-  CHECK(next_function_link() == NULL ||
-        next_function_link()->IsUndefined(GetIsolate()) ||
-        next_function_link()->IsJSFunction());
   CHECK(map()->is_callable());
 }
 
@@ -749,7 +729,8 @@ void SharedFunctionInfo::SharedFunctionInfoVerify() {
 
   Isolate* isolate = GetIsolate();
   CHECK(function_data()->IsUndefined(isolate) || IsApiFunction() ||
-        HasBytecodeArray() || HasAsmWasmData());
+        HasBytecodeArray() || HasAsmWasmData() ||
+        HasLazyDeserializationBuiltinId());
 
   CHECK(function_identifier()->IsUndefined(isolate) || HasBuiltinFunctionId() ||
         HasInferredName());
@@ -848,7 +829,6 @@ void PropertyCell::PropertyCellVerify() {
 void WeakCell::WeakCellVerify() {
   CHECK(IsWeakCell());
   VerifyObjectField(kValueOffset);
-  VerifyObjectField(kNextOffset);
 }
 
 
@@ -1023,9 +1003,8 @@ void JSWeakSet::JSWeakSetVerify() {
   CHECK(table()->IsHashTable() || table()->IsUndefined(GetIsolate()));
 }
 
-void JSPromiseCapability::JSPromiseCapabilityVerify() {
-  CHECK(IsJSPromiseCapability());
-  JSObjectVerify();
+void PromiseCapability::PromiseCapabilityVerify() {
+  CHECK(IsPromiseCapability());
   VerifyPointer(promise());
   VerifyPointer(resolve());
   VerifyPointer(reject());
@@ -1035,7 +1014,6 @@ void JSPromise::JSPromiseVerify() {
   CHECK(IsJSPromise());
   JSObjectVerify();
   Isolate* isolate = GetIsolate();
-  VerifySmiField(kStatusOffset);
   CHECK(result()->IsUndefined(isolate) || result()->IsObject());
   CHECK(deferred_promise()->IsUndefined(isolate) ||
         deferred_promise()->IsJSReceiver() ||
@@ -1235,6 +1213,8 @@ void AsyncGeneratorRequest::AsyncGeneratorRequestVerify() {
   next()->ObjectVerify();
 }
 
+void BigInt::BigIntVerify() { CHECK(IsBigInt()); }
+
 void JSModuleNamespace::JSModuleNamespaceVerify() {
   CHECK(IsJSModuleNamespace());
   VerifyPointer(module());
@@ -1270,9 +1250,10 @@ void Module::ModuleVerify() {
   VerifySmiField(kHashOffset);
   VerifySmiField(kStatusOffset);
 
-  CHECK((status() < kInstantiating && code()->IsSharedFunctionInfo()) ||
-        (status() < kEvaluating && code()->IsJSFunction()) ||
-        code()->IsModuleInfo());
+  CHECK((status() >= kEvaluating && code()->IsModuleInfo()) ||
+        (status() == kInstantiated && code()->IsJSGeneratorObject()) ||
+        (status() >= kInstantiating && code()->IsJSFunction()) ||
+        (code()->IsSharedFunctionInfo()));
 
   CHECK_EQ(status() == kErrored, !exception()->IsTheHole(GetIsolate()));
 
@@ -1301,8 +1282,14 @@ void PrototypeInfo::PrototypeInfoVerify() {
 
 void Tuple2::Tuple2Verify() {
   CHECK(IsTuple2());
-  VerifyObjectField(kValue1Offset);
-  VerifyObjectField(kValue2Offset);
+  Heap* heap = GetHeap();
+  if (this == heap->empty_enum_cache()) {
+    CHECK_EQ(heap->empty_fixed_array(), EnumCache::cast(this)->keys());
+    CHECK_EQ(heap->empty_fixed_array(), EnumCache::cast(this)->indices());
+  } else {
+    VerifyObjectField(kValue1Offset);
+    VerifyObjectField(kValue2Offset);
+  }
 }
 
 void Tuple3::Tuple3Verify() {
@@ -1587,14 +1574,15 @@ bool TransitionArray::IsSortedNoDuplicates(int valid_entries) {
     uint32_t hash = key->Hash();
     PropertyKind kind = kData;
     PropertyAttributes attributes = NONE;
-    if (!IsSpecialTransition(key)) {
+    if (!TransitionsAccessor::IsSpecialTransition(key)) {
       Map* target = GetTarget(i);
-      PropertyDetails details = GetTargetDetails(key, target);
+      PropertyDetails details =
+          TransitionsAccessor::GetTargetDetails(key, target);
       kind = details.kind();
       attributes = details.attributes();
     } else {
       // Duplicate entries are not allowed for non-property transitions.
-      CHECK_NE(prev_key, key);
+      DCHECK_NE(prev_key, key);
     }
 
     int cmp = CompareKeys(prev_key, prev_hash, prev_kind, prev_attributes, key,
@@ -1611,15 +1599,10 @@ bool TransitionArray::IsSortedNoDuplicates(int valid_entries) {
   return true;
 }
 
-
-// static
-bool TransitionArray::IsSortedNoDuplicates(Map* map) {
-  Object* raw_transitions = map->raw_transitions();
-  if (IsFullTransitionArray(raw_transitions)) {
-    return TransitionArray::cast(raw_transitions)->IsSortedNoDuplicates();
-  }
+bool TransitionsAccessor::IsSortedNoDuplicates() {
   // Simple and non-existent transitions are always sorted.
-  return true;
+  if (encoding() != kFullTransitionArray) return true;
+  return transitions()->IsSortedNoDuplicates();
 }
 
 
@@ -1627,17 +1610,14 @@ static bool CheckOneBackPointer(Map* current_map, Object* target) {
   return !target->IsMap() || Map::cast(target)->GetBackPointer() == current_map;
 }
 
-
-// static
-bool TransitionArray::IsConsistentWithBackPointers(Map* map) {
-  Object* transitions = map->raw_transitions();
-  for (int i = 0; i < TransitionArray::NumberOfTransitions(transitions); ++i) {
-    Map* target = TransitionArray::GetTarget(transitions, i);
-    if (!CheckOneBackPointer(map, target)) return false;
+bool TransitionsAccessor::IsConsistentWithBackPointers() {
+  int num_transitions = NumberOfTransitions();
+  for (int i = 0; i < num_transitions; i++) {
+    Map* target = GetTarget(i);
+    if (!CheckOneBackPointer(map_, target)) return false;
   }
   return true;
 }
-
 
 // Estimates if there is a path from the object to a context.
 // This function is not precise, and can return false even if
@@ -1670,73 +1650,13 @@ bool CanLeak(Object* obj, Heap* heap, bool skip_weak_cell) {
 void Code::VerifyEmbeddedObjects(VerifyMode mode) {
   if (kind() == OPTIMIZED_FUNCTION) return;
   Heap* heap = GetIsolate()->heap();
-  int mask = RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT) |
-             RelocInfo::ModeMask(RelocInfo::CELL);
+  int mask = RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT);
   bool skip_weak_cell = (mode == kNoContextSpecificPointers) ? false : true;
   for (RelocIterator it(this, mask); !it.done(); it.next()) {
-    Object* target = it.rinfo()->rmode() == RelocInfo::CELL
-                         ? it.rinfo()->target_cell()
-                         : it.rinfo()->target_object();
-    CHECK(!CanLeak(target, heap, skip_weak_cell));
+    Object* target = it.rinfo()->target_object();
+    DCHECK(!CanLeak(target, heap, skip_weak_cell));
   }
 }
-
-
-// Verify that the debugger can redirect old code to the new code.
-void Code::VerifyRecompiledCode(Code* old_code, Code* new_code) {
-  if (old_code->kind() != FUNCTION) return;
-  if (new_code->kind() != FUNCTION) return;
-  Isolate* isolate = old_code->GetIsolate();
-  // Do not verify during bootstrapping. We may replace code using %SetCode.
-  if (isolate->bootstrapper()->IsActive()) return;
-
-  static const int mask = RelocInfo::kCodeTargetMask;
-  RelocIterator old_it(old_code, mask);
-  RelocIterator new_it(new_code, mask);
-  Code* stack_check = isolate->builtins()->builtin(Builtins::kStackCheck);
-
-  while (!old_it.done()) {
-    RelocInfo* rinfo = old_it.rinfo();
-    Code* target = Code::GetCodeFromTargetAddress(rinfo->target_address());
-    CHECK(!target->is_handler() && !target->is_inline_cache_stub());
-    if (target == stack_check) break;
-    old_it.next();
-  }
-
-  while (!new_it.done()) {
-    RelocInfo* rinfo = new_it.rinfo();
-    Code* target = Code::GetCodeFromTargetAddress(rinfo->target_address());
-    CHECK(!target->is_handler() && !target->is_inline_cache_stub());
-    if (target == stack_check) break;
-    new_it.next();
-  }
-
-  // Either both are done because there is no stack check.
-  // Or we are past the prologue for both.
-  CHECK_EQ(new_it.done(), old_it.done());
-
-  // After the prologue, each call in the old code has a corresponding call
-  // in the new code.
-  while (!old_it.done() && !new_it.done()) {
-    Code* old_target =
-        Code::GetCodeFromTargetAddress(old_it.rinfo()->target_address());
-    Code* new_target =
-        Code::GetCodeFromTargetAddress(new_it.rinfo()->target_address());
-    CHECK_EQ(old_target->kind(), new_target->kind());
-    // Check call target for equality unless it's an IC or an interrupt check.
-    // In both cases they may be patched to be something else.
-    if (!old_target->is_handler() && !old_target->is_inline_cache_stub() &&
-        new_target != isolate->builtins()->builtin(Builtins::kInterruptCheck)) {
-      CHECK_EQ(old_target, new_target);
-    }
-    old_it.next();
-    new_it.next();
-  }
-
-  // Both are done at the same time.
-  CHECK_EQ(new_it.done(), old_it.done());
-}
-
 
 #endif  // DEBUG
 

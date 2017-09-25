@@ -23,13 +23,17 @@
            FLAG_ignore_asm_unimplemented_break ? NO_PARAM : BREAK)
 #if DEBUG
 #define ASM_LOCATION(message) __ Debug("LOCATION: " message, __LINE__, NO_PARAM)
+#define ASM_LOCATION_IN_ASSEMBLER(message) \
+  Debug("LOCATION: " message, __LINE__, NO_PARAM)
 #else
 #define ASM_LOCATION(message)
+#define ASM_LOCATION_IN_ASSEMBLER(message)
 #endif
 #else
 #define ASM_UNIMPLEMENTED(message)
 #define ASM_UNIMPLEMENTED_BREAK(message)
 #define ASM_LOCATION(message)
+#define ASM_LOCATION_IN_ASSEMBLER(message)
 #endif
 
 
@@ -180,21 +184,7 @@ enum PreShiftImmMode {
 class TurboAssembler : public Assembler {
  public:
   TurboAssembler(Isolate* isolate, void* buffer, int buffer_size,
-                 CodeObjectRequired create_code_object)
-      : Assembler(isolate, buffer, buffer_size),
-        isolate_(isolate),
-#if DEBUG
-        allow_macro_instructions_(true),
-#endif
-        tmp_list_(DefaultTmpList()),
-        fptmp_list_(DefaultFPTmpList()),
-        sp_(jssp),
-        use_real_aborts_(true) {
-    if (create_code_object == CodeObjectRequired::kYes) {
-      code_object_ =
-          Handle<HeapObject>::New(isolate->heap()->undefined_value(), isolate);
-    }
-  }
+                 CodeObjectRequired create_code_object);
 
   // The Abort method should call a V8 runtime function, but the CallRuntime
   // mechanism depends on CEntryStub. If use_real_aborts is false, Abort will
@@ -698,6 +688,14 @@ class TurboAssembler : public Assembler {
   inline void Drop(int64_t count, uint64_t unit_size = kXRegSize);
   inline void Drop(const Register& count, uint64_t unit_size = kXRegSize);
 
+  // Drop arguments from stack without actually accessing memory.
+  // This will currently drop 'count' arguments of the given size from the
+  // stack.
+  // TODO(arm64): Update this to round up the number of bytes dropped to
+  // a multiple of 16, so that we can remove jssp.
+  inline void DropArguments(const Register& count,
+                            uint64_t unit_size = kXRegSize);
+
   // Re-synchronizes the system stack pointer (csp) with the current stack
   // pointer (according to StackPointer()).
   //
@@ -783,6 +781,13 @@ class TurboAssembler : public Assembler {
   inline void push(Register src) { Push(src); }
   inline void pop(Register dst) { Pop(dst); }
 
+  void SaveRegisters(RegList registers);
+  void RestoreRegisters(RegList registers);
+
+  void CallRecordWriteStub(Register object, Register address,
+                           RememberedSetAction remembered_set_action,
+                           SaveFPRegsMode fp_mode);
+
   // Alternative forms of Push and Pop, taking a RegList or CPURegList that
   // specifies the registers that are to be pushed or popped. Higher-numbered
   // registers are associated with higher memory addresses (as in the A32 push
@@ -795,6 +800,24 @@ class TurboAssembler : public Assembler {
   // Otherwise, (Push|Pop)(CPU|X|W|D|S)RegList is preferred.
   void PushCPURegList(CPURegList registers);
   void PopCPURegList(CPURegList registers);
+
+  // Calculate how much stack space (in bytes) are required to store caller
+  // registers excluding those specified in the arguments.
+  int RequiredStackSizeForCallerSaved(SaveFPRegsMode fp_mode,
+                                      Register exclusion1 = no_reg,
+                                      Register exclusion2 = no_reg,
+                                      Register exclusion3 = no_reg) const;
+
+  // Push caller saved registers on the stack, and return the number of bytes
+  // stack pointer is adjusted.
+  int PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1 = no_reg,
+                      Register exclusion2 = no_reg,
+                      Register exclusion3 = no_reg);
+  // Restore caller saved registers from the stack, and return the number of
+  // bytes stack pointer is adjusted.
+  int PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1 = no_reg,
+                     Register exclusion2 = no_reg,
+                     Register exclusion3 = no_reg);
 
   // Move an immediate into register dst, and return an Operand object for use
   // with a subsequent instruction that accepts a shift. The value moved into
@@ -863,6 +886,10 @@ class TurboAssembler : public Assembler {
   void Call(Label* target);
   void Call(Address target, RelocInfo::Mode rmode);
   void Call(Handle<Code> code, RelocInfo::Mode rmode = RelocInfo::CODE_TARGET);
+
+  void CallForDeoptimization(Address target, RelocInfo::Mode rmode) {
+    Call(target, rmode);
+  }
 
   // For every Call variant, there is a matching CallSize function that returns
   // the size (in bytes) of the call sequence.
@@ -1147,41 +1174,7 @@ class TurboAssembler : public Assembler {
   inline void Mrs(const Register& rt, SystemRegister sysreg);
 
   // Generates function prologue code.
-  void Prologue(bool code_pre_aging);
-
-  // Code ageing support functions.
-
-  // Code ageing on ARM64 works similarly to on ARM. When V8 wants to mark a
-  // function as old, it replaces some of the function prologue (generated by
-  // FullCodeGenerator::Generate) with a call to a special stub (ultimately
-  // generated by GenerateMakeCodeYoungAgainCommon). The stub restores the
-  // function prologue to its initial young state (indicating that it has been
-  // recently run) and continues. A young function is therefore one which has a
-  // normal frame setup sequence, and an old function has a code age sequence
-  // which calls a code ageing stub.
-
-  // Set up a basic stack frame for young code (or code exempt from ageing) with
-  // type FUNCTION. It may be patched later for code ageing support. This is
-  // done by to Code::PatchPlatformCodeAge and EmitCodeAgeSequence.
-  //
-  // This function takes an Assembler so it can be called from either a
-  // MacroAssembler or a PatchingAssembler context.
-  static void EmitFrameSetupForCodeAgePatching(Assembler* assm);
-
-  // Call EmitFrameSetupForCodeAgePatching from a MacroAssembler context.
-  void EmitFrameSetupForCodeAgePatching();
-
-  // Emit a code age sequence that calls the relevant code age stub. The code
-  // generated by this sequence is expected to replace the code generated by
-  // EmitFrameSetupForCodeAgePatching, and represents an old function.
-  //
-  // If stub is NULL, this function generates the code age sequence but omits
-  // the stub address that is normally embedded in the instruction stream. This
-  // can be used by debug code to verify code age sequences.
-  static void EmitCodeAgeSequence(Assembler* assm, Code* stub);
-
-  // Call EmitCodeAgeSequence from a MacroAssembler context.
-  void EmitCodeAgeSequence(Code* stub);
+  void Prologue();
 
   void Cmgt(const VRegister& vd, const VRegister& vn, int imm) {
     DCHECK(allow_macro_instructions());
@@ -1322,10 +1315,6 @@ class MacroAssembler : public TurboAssembler {
   inline void FN(const Register& rs, const Register& rt, const Register& rn);
   STLX_MACRO_LIST(DECLARE_FUNCTION)
 #undef DECLARE_FUNCTION
-
-  // V8-specific load/store helpers.
-  void Load(const Register& rt, const MemOperand& addr, Representation r);
-  void Store(const Register& rt, const MemOperand& addr, Representation r);
 
   // Branch type inversion relies on these relations.
   STATIC_ASSERT((reg_zero == (reg_not_zero ^ 1)) &&
@@ -1601,8 +1590,6 @@ class MacroAssembler : public TurboAssembler {
   void PushMultipleTimes(CPURegister src, Register count);
   void PushMultipleTimes(CPURegister src, int count);
 
-  inline void PushObject(Handle<Object> handle);
-
   // Sometimes callers need to push or pop multiple registers in a way that is
   // difficult to structure efficiently for fixed Push or Pop calls. This scope
   // allows push requests to be queued up, then flushed at once. The
@@ -1726,16 +1713,10 @@ class MacroAssembler : public TurboAssembler {
 
   // Helpers ------------------------------------------------------------------
 
-  // Store an object to the root table.
-  void StoreRoot(Register source,
-                 Heap::RootListIndex index);
-
   static int SafepointRegisterStackIndex(int reg_code);
 
   void LoadInstanceDescriptors(Register map,
                                Register descriptors);
-  void EnumLengthUntagged(Register dst, Register map);
-  void NumberOfOwnDescriptors(Register dst, Register map);
   void LoadAccessor(Register dst, Register holder, int accessor_index,
                     AccessorComponent accessor);
 
@@ -1855,21 +1836,11 @@ class MacroAssembler : public TurboAssembler {
     CallRuntime(function, function->nargs, save_doubles);
   }
 
-  void CallRuntimeSaveDoubles(Runtime::FunctionId fid) {
-    const Runtime::Function* function = Runtime::FunctionForId(fid);
-    CallRuntime(function, function->nargs, kSaveFPRegs);
-  }
-
   void TailCallRuntime(Runtime::FunctionId fid);
 
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& builtin,
                                bool builtin_exit_frame = false);
-
-  // Convenience function: call an external reference.
-  void CallExternalReference(const ExternalReference& ext,
-                             int num_arguments);
-
 
   // Registers used through the invocation chain are hard-coded.
   // We force passing the parameters to ensure the contracts are correctly
@@ -1879,11 +1850,8 @@ class MacroAssembler : public TurboAssembler {
   // 'expected' must use an immediate or x2.
   // 'call_kind' must be x5.
   void InvokePrologue(const ParameterCount& expected,
-                      const ParameterCount& actual,
-                      Label* done,
-                      InvokeFlag flag,
-                      bool* definitely_mismatches,
-                      const CallWrapper& call_wrapper);
+                      const ParameterCount& actual, Label* done,
+                      InvokeFlag flag, bool* definitely_mismatches);
 
   // On function call, call into the debugger if necessary.
   void CheckDebugHook(Register fun, Register new_target,
@@ -1891,40 +1859,21 @@ class MacroAssembler : public TurboAssembler {
                       const ParameterCount& actual);
   void InvokeFunctionCode(Register function, Register new_target,
                           const ParameterCount& expected,
-                          const ParameterCount& actual, InvokeFlag flag,
-                          const CallWrapper& call_wrapper);
+                          const ParameterCount& actual, InvokeFlag flag);
   // Invoke the JavaScript function in the given register.
   // Changes the current context to the context in the function before invoking.
-  void InvokeFunction(Register function,
-                      Register new_target,
-                      const ParameterCount& actual,
-                      InvokeFlag flag,
-                      const CallWrapper& call_wrapper);
-  void InvokeFunction(Register function,
-                      const ParameterCount& expected,
-                      const ParameterCount& actual,
-                      InvokeFlag flag,
-                      const CallWrapper& call_wrapper);
+  void InvokeFunction(Register function, Register new_target,
+                      const ParameterCount& actual, InvokeFlag flag);
+  void InvokeFunction(Register function, const ParameterCount& expected,
+                      const ParameterCount& actual, InvokeFlag flag);
   void InvokeFunction(Handle<JSFunction> function,
                       const ParameterCount& expected,
-                      const ParameterCount& actual,
-                      InvokeFlag flag,
-                      const CallWrapper& call_wrapper);
+                      const ParameterCount& actual, InvokeFlag flag);
 
   // ---- Code generation helpers ----
 
   // Frame restart support
   void MaybeDropFrames();
-
-  // Exception handling
-
-  // Push a new stack handler and link into stack handler chain.
-  void PushStackHandler();
-
-  // Unlink the stack handler on top of the stack from the stack handler chain.
-  // Must preserve the result register.
-  void PopStackHandler();
-
 
   // ---------------------------------------------------------------------------
   // Allocation support
@@ -1935,26 +1884,12 @@ class MacroAssembler : public TurboAssembler {
   //
   // If the new space is exhausted control continues at the gc_required label.
   // In this case, the result and scratch registers may still be clobbered.
-  void Allocate(Register object_size, Register result, Register result_end,
-                Register scratch, Label* gc_required, AllocationFlags flags);
-
   void Allocate(int object_size,
                 Register result,
                 Register scratch1,
                 Register scratch2,
                 Label* gc_required,
                 AllocationFlags flags);
-
-  // Allocates a heap number or jumps to the gc_required label if the young
-  // space is full and a scavenge is needed.
-  // All registers are clobbered.
-  // If no heap_number_map register is provided, the function will take care of
-  // loading it.
-  void AllocateHeapNumber(Register result, Label* gc_required,
-                          Register scratch1, Register scratch2,
-                          CPURegister value = NoVReg,
-                          CPURegister heap_number_map = NoReg,
-                          MutableMode mode = IMMUTABLE);
 
   // Allocate and initialize a JSValue wrapper with the specified {constructor}
   // and {value}.
@@ -2057,9 +1992,6 @@ class MacroAssembler : public TurboAssembler {
   // register.
   void LoadElementsKindFromMap(Register result, Register map);
 
-  // Load the value from the root list and push it onto the stack.
-  void PushRoot(Heap::RootListIndex index);
-
   // Compare the object in a register to a value from the root list.
   void CompareRoot(const Register& obj, Heap::RootListIndex index);
 
@@ -2072,15 +2004,6 @@ class MacroAssembler : public TurboAssembler {
   void JumpIfNotRoot(const Register& obj,
                      Heap::RootListIndex index,
                      Label* if_not_equal);
-
-  // Load and check the instance type of an object for being a string.
-  // Loads the type into the second argument register.
-  // The object and type arguments can be the same register; in that case it
-  // will be overwritten with the type.
-  // Jumps to not_string or string appropriate. If the appropriate label is
-  // NULL, fall through.
-  inline void IsObjectJSStringType(Register object, Register type,
-                                   Label* not_string, Label* string = NULL);
 
   // Compare the contents of a register with an operand, and branch to true,
   // false or fall through, depending on condition.
@@ -2100,25 +2023,10 @@ class MacroAssembler : public TurboAssembler {
                     Label* fall_through);
 
   // ---------------------------------------------------------------------------
-  // Inline caching support.
-
-  // Hash the interger value in 'key' register.
-  // It uses the same algorithm as ComputeIntegerHash in utils.h.
-  void GetNumberHash(Register key, Register scratch);
-
-  // ---------------------------------------------------------------------------
   // Frames.
-
-  // Load the type feedback vector from a JavaScript frame.
-  void EmitLoadFeedbackVector(Register vector);
 
   void EnterBuiltinFrame(Register context, Register target, Register argc);
   void LeaveBuiltinFrame(Register context, Register target, Register argc);
-
-  // Returns map with validated enum cache in object register.
-  void CheckEnumCache(Register object, Register scratch0, Register scratch1,
-                      Register scratch2, Register scratch3, Register scratch4,
-                      Label* call_runtime);
 
   // The stack pointer has to switch between csp and jssp when setting up and
   // destroying the exit frame. Hence preserving/restoring the registers is
@@ -2168,8 +2076,6 @@ class MacroAssembler : public TurboAssembler {
                       const Register& scratch,
                       bool restore_context);
 
-  void LoadContext(Register dst, int context_chain_length);
-
   // Load the global object from the current context.
   void LoadGlobalObject(Register dst) {
     LoadNativeContextSlot(Context::EXTENSION_INDEX, dst);
@@ -2209,13 +2115,6 @@ class MacroAssembler : public TurboAssembler {
   // RegList constant kSafepointSavedRegisters.
   void PushSafepointRegisters();
   void PopSafepointRegisters();
-
-  // Store value in register src in the safepoint stack slot for register dst.
-  void StoreToSafepointRegisterSlot(Register src, Register dst);
-
-  // Load the value of the src register from its safepoint stack slot
-  // into register dst.
-  void LoadFromSafepointRegisterSlot(Register dst, Register src);
 
   void CheckPageFlag(const Register& object, const Register& scratch, int mask,
                      Condition cc, Label* condition_met);
@@ -2272,11 +2171,6 @@ class MacroAssembler : public TurboAssembler {
                      smi_check,
                      pointers_to_here_check_for_value);
   }
-
-  // Notify the garbage collector that we wrote a code entry into a
-  // JSFunction. Only scratch is clobbered by the operation.
-  void RecordWriteCodeEntryField(Register js_function, Register code_entry,
-                                 Register scratch);
 
   void RecordWriteForMap(
       Register object,
@@ -2386,11 +2280,6 @@ class MacroAssembler : public TurboAssembler {
                         const CPURegister& arg2 = NoCPUReg,
                         const CPURegister& arg3 = NoCPUReg);
 
-  // Return true if the sequence is a young sequence geneated by
-  // EmitFrameSetupForCodeAgePatching. Otherwise, this method asserts that the
-  // sequence is a code age sequence (emitted by EmitCodeAgeSequence).
-  static bool IsYoungSequence(Isolate* isolate, byte* sequence);
-
  private:
   // Helper for implementing JumpIfNotInNewSpace and JumpIfInNewSpace.
   void InNewSpace(Register object,
@@ -2427,7 +2316,7 @@ class MacroAssembler : public TurboAssembler {
 };
 
 
-// Use this scope when you need a one-to-one mapping bewteen methods and
+// Use this scope when you need a one-to-one mapping between methods and
 // instructions. This scope prevents the MacroAssembler from being called and
 // literal pools from being emitted. It also asserts the number of instructions
 // emitted is what you specified when creating the scope.
@@ -2505,17 +2394,11 @@ class UseScratchRegisterScope {
     return VRegister::Create(AcquireNextAvailable(availablefp_).code(), format);
   }
 
-  Register UnsafeAcquire(const Register& reg) {
-    return Register(UnsafeAcquire(available_, reg));
-  }
-
   Register AcquireSameSizeAs(const Register& reg);
   VRegister AcquireSameSizeAs(const VRegister& reg);
 
  private:
   static CPURegister AcquireNextAvailable(CPURegList* available);
-  static CPURegister UnsafeAcquire(CPURegList* available,
-                                   const CPURegister& reg);
 
   // Available scratch registers.
   CPURegList* available_;     // kRegister

@@ -39,42 +39,17 @@
 
 #include "src/v8.h"
 
-#include "src/full-codegen/full-codegen.h"
 #include "src/global-handles.h"
 #include "src/heap/mark-compact-inl.h"
 #include "src/heap/mark-compact.h"
-#include "src/heap/sequential-marking-deque.h"
 #include "src/objects-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/heap/heap-tester.h"
 #include "test/cctest/heap/heap-utils.h"
 
-using namespace v8::internal;
-using v8::Just;
-
-TEST(SequentialMarkingDeque) {
-  CcTest::InitializeVM();
-  SequentialMarkingDeque s(CcTest::i_isolate()->heap());
-  s.SetUp();
-  s.StartUsing();
-  Address original_address = reinterpret_cast<Address>(&s);
-  Address current_address = original_address;
-  while (!s.IsFull()) {
-    s.Push(HeapObject::FromAddress(current_address));
-    current_address += kPointerSize;
-  }
-
-  while (!s.IsEmpty()) {
-    Address value = s.Pop()->address();
-    current_address -= kPointerSize;
-    CHECK_EQ(current_address, value);
-  }
-
-  CHECK_EQ(original_address, current_address);
-  s.StopUsing();
-  CcTest::i_isolate()->cancelable_task_manager()->CancelAndWait();
-  s.TearDown();
-}
+namespace v8 {
+namespace internal {
+namespace heap {
 
 TEST(Promotion) {
   CcTest::InitializeVM();
@@ -355,10 +330,15 @@ TEST(Regress5829) {
                              ClearRecordedSlots::kNo);
   heap->old_space()->EmptyAllocationInfo();
   Page* page = Page::FromAddress(array->address());
+  IncrementalMarking::MarkingState* marking_state = marking->marking_state();
   for (auto object_and_size :
-       LiveObjectRange<kGreyObjects>(page, MarkingState::Internal(page))) {
+       LiveObjectRange<kGreyObjects>(page, marking_state->bitmap(page))) {
     CHECK(!object_and_size.first->IsFiller());
   }
 }
 
 #endif  // __linux__ and !USE_SIMULATOR
+
+}  // namespace heap
+}  // namespace internal
+}  // namespace v8

@@ -55,11 +55,11 @@ class V8_EXPORT_PRIVATE EffectControlLinearizer {
   Node* LowerCheckBounds(Node* node, Node* frame_state);
   Node* LowerCheckInternalizedString(Node* node, Node* frame_state);
   Node* LowerCheckMaps(Node* node, Node* frame_state);
+  Node* LowerCompareMaps(Node* node);
   Node* LowerCheckNumber(Node* node, Node* frame_state);
   Node* LowerCheckReceiver(Node* node, Node* frame_state);
   Node* LowerCheckString(Node* node, Node* frame_state);
   Node* LowerCheckSeqString(Node* node, Node* frame_state);
-  Node* LowerCheckNonEmptyString(Node* node, Node* frame_state);
   Node* LowerCheckSymbol(Node* node, Node* frame_state);
   Node* LowerCheckIf(Node* node, Node* frame_state);
   Node* LowerCheckedInt32Add(Node* node, Node* frame_state);
@@ -84,6 +84,7 @@ class V8_EXPORT_PRIVATE EffectControlLinearizer {
   Node* LowerTruncateTaggedToFloat64(Node* node);
   Node* LowerTruncateTaggedToWord32(Node* node);
   Node* LowerCheckedTruncateTaggedToWord32(Node* node, Node* frame_state);
+  Node* LowerObjectIsCallable(Node* node);
   Node* LowerObjectIsDetectableCallable(Node* node);
   Node* LowerObjectIsNaN(Node* node);
   Node* LowerObjectIsNonCallable(Node* node);
@@ -95,7 +96,7 @@ class V8_EXPORT_PRIVATE EffectControlLinearizer {
   Node* LowerObjectIsUndetectable(Node* node);
   Node* LowerArgumentsFrame(Node* node);
   Node* LowerArgumentsLength(Node* node);
-  Node* LowerNewUnmappedArgumentsElements(Node* node);
+  Node* LowerNewArgumentsElements(Node* node);
   Node* LowerArrayBufferWasNeutered(Node* node);
   Node* LowerStringCharAt(Node* node);
   Node* LowerStringCharCodeAt(Node* node);
@@ -117,11 +118,13 @@ class V8_EXPORT_PRIVATE EffectControlLinearizer {
   Node* LowerEnsureWritableFastElements(Node* node);
   Node* LowerMaybeGrowFastElements(Node* node, Node* frame_state);
   void LowerTransitionElementsKind(Node* node);
+  Node* LowerLoadFieldByIndex(Node* node);
   Node* LowerLoadTypedElement(Node* node);
   void LowerStoreTypedElement(Node* node);
   Node* LowerLookupHashStorageIndex(Node* node);
   Node* LowerLoadHashMapValue(Node* node);
   void LowerTransitionAndStoreElement(Node* node);
+  void LowerRuntimeAbort(Node* node);
 
   // Lowering of optional operators.
   Maybe<Node*> LowerFloat64RoundUp(Node* node);

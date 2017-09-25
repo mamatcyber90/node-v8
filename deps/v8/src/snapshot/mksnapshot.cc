@@ -10,13 +10,10 @@
 #include "src/assembler.h"
 #include "src/base/platform/platform.h"
 #include "src/flags.h"
-#include "src/list.h"
 #include "src/msan.h"
 #include "src/snapshot/natives.h"
 #include "src/snapshot/partial-serializer.h"
 #include "src/snapshot/startup-serializer.h"
-
-using namespace v8;
 
 class SnapshotWriter {
  public:
@@ -35,10 +32,6 @@ class SnapshotWriter {
     // we end up with a corrupted snapshot file. The build step would succeed,
     // but the build target is unusable. Ideally we would write out temporary
     // files and only move them to the final destination as last step.
-
-    // Tell MSan to ignore uninitialized padding in the blob.
-    MSAN_MEMORY_IS_INITIALIZED(blob.data, blob.raw_size);
-
     i::Vector<const i::byte> blob_vector(
         reinterpret_cast<const i::byte*>(blob.data), blob.raw_size);
     MaybeWriteSnapshotFile(blob_vector);
@@ -108,7 +101,7 @@ class SnapshotWriter {
   }
 
   static FILE* GetFileDescriptorOrDie(const char* filename) {
-    FILE* fp = base::OS::FOpen(filename, "wb");
+    FILE* fp = v8::base::OS::FOpen(filename, "wb");
     if (fp == NULL) {
       i::PrintF("Unable to open file \"%s\" for writing.\n", filename);
       exit(1);
@@ -123,7 +116,7 @@ class SnapshotWriter {
 char* GetExtraCode(char* filename, const char* description) {
   if (filename == NULL || strlen(filename) == 0) return NULL;
   ::printf("Loading script for %s: %s\n", description, filename);
-  FILE* file = base::OS::FOpen(filename, "rb");
+  FILE* file = v8::base::OS::FOpen(filename, "rb");
   if (file == NULL) {
     fprintf(stderr, "Failed to open '%s': errno %d\n", filename, errno);
     exit(1);
@@ -161,7 +154,7 @@ int main(int argc, char** argv) {
   }
 
   i::CpuFeatures::Probe(true);
-  V8::InitializeICUDefaultLocation(argv[0]);
+  v8::V8::InitializeICUDefaultLocation(argv[0]);
   v8::Platform* platform = v8::platform::CreateDefaultPlatform();
   v8::V8::InitializePlatform(platform);
   v8::V8::Initialize();
@@ -172,12 +165,12 @@ int main(int argc, char** argv) {
     if (i::FLAG_startup_blob) writer.SetStartupBlobFile(i::FLAG_startup_blob);
 
     char* embed_script = GetExtraCode(argc >= 2 ? argv[1] : NULL, "embedding");
-    StartupData blob = v8::V8::CreateSnapshotDataBlob(embed_script);
+    v8::StartupData blob = v8::V8::CreateSnapshotDataBlob(embed_script);
     delete[] embed_script;
 
     char* warmup_script = GetExtraCode(argc >= 3 ? argv[2] : NULL, "warm up");
     if (warmup_script) {
-      StartupData cold = blob;
+      v8::StartupData cold = blob;
       blob = v8::V8::WarmUpSnapshotDataBlob(cold, warmup_script);
       delete[] cold.data;
       delete[] warmup_script;
@@ -188,8 +181,8 @@ int main(int argc, char** argv) {
     delete[] blob.data;
   }
 
-  V8::Dispose();
-  V8::ShutdownPlatform();
+  v8::V8::Dispose();
+  v8::V8::ShutdownPlatform();
   delete platform;
   return 0;
 }

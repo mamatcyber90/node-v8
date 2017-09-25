@@ -6,9 +6,9 @@
 #define V8_PROFILER_HEAP_PROFILER_H_
 
 #include <memory>
+#include <vector>
 
 #include "src/isolate.h"
-#include "src/list.h"
 
 namespace v8 {
 namespace internal {
@@ -24,8 +24,6 @@ class HeapProfiler {
  public:
   explicit HeapProfiler(Heap* heap);
   ~HeapProfiler();
-
-  size_t GetMemorySizeUsedByProfiler();
 
   HeapSnapshot* TakeSnapshot(
       v8::ActivityControl* control,
@@ -78,14 +76,18 @@ class HeapProfiler {
 
   Isolate* isolate() const { return heap()->isolate(); }
 
+  void QueryObjects(Handle<Context> context,
+                    debug::QueryObjectPredicate* predicate,
+                    v8::PersistentValueVector<v8::Object>* objects);
+
  private:
   Heap* heap() const;
 
   // Mapping from HeapObject addresses to objects' uids.
   std::unique_ptr<HeapObjectsMap> ids_;
-  List<HeapSnapshot*> snapshots_;
+  std::vector<HeapSnapshot*> snapshots_;
   std::unique_ptr<StringsStorage> names_;
-  List<v8::HeapProfiler::WrapperInfoCallback> wrapper_callbacks_;
+  std::vector<v8::HeapProfiler::WrapperInfoCallback> wrapper_callbacks_;
   std::unique_ptr<AllocationTracker> allocation_tracker_;
   bool is_tracking_object_moves_;
   base::Mutex profiler_mutex_;

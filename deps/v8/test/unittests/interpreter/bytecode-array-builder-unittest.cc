@@ -145,6 +145,9 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
   builder.CreateArrayLiteral(0, 0, 0);
   builder.CreateObjectLiteral(0, 0, 0, reg);
 
+  // Emit tagged template operations.
+  builder.GetTemplateObject(0);
+
   // Call operations.
   builder.CallAnyReceiver(reg, reg_list, 1)
       .CallProperty(reg, reg_list, 1)
@@ -158,7 +161,7 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
       .CallRuntime(Runtime::kIsArray, reg)
       .CallRuntimeForPair(Runtime::kLoadLookupSlotForCall, reg_list, pair)
       .CallJSRuntime(Context::SPREAD_ITERABLE_INDEX, reg_list)
-      .CallWithSpread(reg, reg_list);
+      .CallWithSpread(reg, reg_list, 1);
 
   // Emit binary operator invocations.
   builder.BinaryOperation(Token::Value::ADD, reg, 1)
@@ -190,12 +193,12 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
       .BinaryOperationSmiLiteral(Token::Value::SAR, Smi::FromInt(42), 2)
       .BinaryOperationSmiLiteral(Token::Value::SHR, Smi::FromInt(42), 2);
 
-  // Emit StringConcat operations.
-  builder.ToPrimitiveToString(reg, 1).StringConcat(pair);
-
-  // Emit count operatior invocations
-  builder.CountOperation(Token::Value::ADD, 1)
-      .CountOperation(Token::Value::SUB, 1);
+  // Emit unary and count operator invocations.
+  builder.UnaryOperation(Token::Value::INC, 1)
+      .UnaryOperation(Token::Value::DEC, 1)
+      .UnaryOperation(Token::Value::ADD, 1)
+      .UnaryOperation(Token::Value::SUB, 1)
+      .UnaryOperation(Token::Value::BIT_NOT, 1);
 
   // Emit unary operator invocations.
   builder.LogicalNot(ToBooleanMode::kConvertToBoolean)
@@ -206,7 +209,7 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
   builder.Delete(reg, LanguageMode::SLOPPY).Delete(reg, LanguageMode::STRICT);
 
   // Emit construct.
-  builder.Construct(reg, reg_list, 1).ConstructWithSpread(reg, reg_list);
+  builder.Construct(reg, reg_list, 1).ConstructWithSpread(reg, reg_list, 1);
 
   // Emit test operator invocations.
   builder.CompareOperation(Token::Value::EQ, reg, 1)
@@ -224,7 +227,7 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
       .CompareNull();
 
   // Emit conversion operator invocations.
-  builder.ToNumber(reg, 1).ToObject(reg).ToName(reg);
+  builder.ToNumber(1).ToObject(reg).ToName(reg);
 
   // Emit GetSuperConstructor.
   builder.GetSuperConstructor(reg);
@@ -298,7 +301,8 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
   BytecodeLabel after_rethrow;
   builder.ReThrow().Bind(&after_rethrow);
 
-  builder.ForInPrepare(reg, triple)
+  builder.ForInEnumerate(reg)
+      .ForInPrepare(triple, 1)
       .ForInContinue(reg, reg)
       .ForInNext(reg, reg, pair, 1)
       .ForInStep(reg);
@@ -354,7 +358,9 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
   builder
       .CreateRegExpLiteral(ast_factory.GetOneByteString("wide_literal"), 0, 0)
       .CreateArrayLiteral(0, 0, 0)
-      .CreateObjectLiteral(0, 0, 0, reg);
+      .CreateEmptyArrayLiteral(0)
+      .CreateObjectLiteral(0, 0, 0, reg)
+      .CreateEmptyObjectLiteral();
 
   // Emit load and store operations for module variables.
   builder.LoadModuleVariable(-1, 42)
@@ -365,7 +371,7 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
       .StoreModuleVariable(1, 42);
 
   // Emit generator operations.
-  builder.SuspendGenerator(reg, reg_list)
+  builder.SuspendGenerator(reg, reg_list, 0)
       .RestoreGeneratorState(reg)
       .RestoreGeneratorRegisters(reg, reg_list);
 
@@ -374,6 +380,12 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
 
   // Emit debugger bytecode.
   builder.Debugger();
+
+  // Emit abort bytecode.
+  {
+    BytecodeLabel after;
+    builder.Abort(kGenerator).Bind(&after);
+  }
 
   // Insert dummy ops to force longer jumps.
   for (int i = 0; i < 256; i++) {
@@ -421,11 +433,9 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
   // Insert entry for illegal bytecode as this is never willingly emitted.
   scorecard[Bytecodes::ToByte(Bytecode::kIllegal)] = 1;
 
-  if (!FLAG_type_profile) {
-    // Bytecode for CollectTypeProfile is only emitted when
-    // Type Information for DevTools is turned on.
-    scorecard[Bytecodes::ToByte(Bytecode::kCollectTypeProfile)] = 1;
-  }
+  // Bytecode for CollectTypeProfile is only emitted when
+  // Type Information for DevTools is turned on.
+  scorecard[Bytecodes::ToByte(Bytecode::kCollectTypeProfile)] = 1;
 
   // Check return occurs at the end and only once in the BytecodeArray.
   CHECK_EQ(final_bytecode, Bytecode::kReturn);

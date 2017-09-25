@@ -16,14 +16,10 @@
 #include "test/common/wasm/test-signatures.h"
 #include "test/common/wasm/wasm-macro-gen.h"
 
-using namespace v8::base;
-using namespace v8::internal;
-using namespace v8::internal::compiler;
-using namespace v8::internal::wasm;
-
 namespace v8 {
 namespace internal {
 namespace wasm {
+namespace test_run_wasm_interpreter {
 
 TEST(Run_WasmInt8Const_i) {
   WasmRunner<int32_t> r(kExecuteInterpreted);
@@ -298,15 +294,15 @@ TEST(Breakpoint_I32And_disable) {
 TEST(GrowMemory) {
   {
     WasmRunner<int32_t, uint32_t> r(kExecuteInterpreted);
-    r.module().AddMemory(WasmModule::kPageSize);
-    r.module().SetMaxMemPages(10);
+    r.builder().AddMemory(WasmModule::kPageSize);
+    r.builder().SetMaxMemPages(10);
     BUILD(r, WASM_GROW_MEMORY(WASM_GET_LOCAL(0)));
     CHECK_EQ(1, r.Call(1));
   }
   {
     WasmRunner<int32_t, uint32_t> r(kExecuteInterpreted);
-    r.module().AddMemory(WasmModule::kPageSize);
-    r.module().SetMaxMemPages(10);
+    r.builder().AddMemory(WasmModule::kPageSize);
+    r.builder().SetMaxMemPages(10);
     BUILD(r, WASM_GROW_MEMORY(WASM_GET_LOCAL(0)));
     CHECK_EQ(-1, r.Call(11));
   }
@@ -316,7 +312,7 @@ TEST(GrowMemoryPreservesData) {
   int32_t index = 16;
   int32_t value = 2335;
   WasmRunner<int32_t, uint32_t> r(kExecuteInterpreted);
-  r.module().AddMemory(WasmModule::kPageSize);
+  r.builder().AddMemory(WasmModule::kPageSize);
   BUILD(r, WASM_STORE_MEM(MachineType::Int32(), WASM_I32V(index),
                           WASM_I32V(value)),
         WASM_GROW_MEMORY(WASM_GET_LOCAL(0)), WASM_DROP,
@@ -327,7 +323,7 @@ TEST(GrowMemoryPreservesData) {
 TEST(GrowMemoryInvalidSize) {
   // Grow memory by an invalid amount without initial memory.
   WasmRunner<int32_t, uint32_t> r(kExecuteInterpreted);
-  r.module().AddMemory(WasmModule::kPageSize);
+  r.builder().AddMemory(WasmModule::kPageSize);
   BUILD(r, WASM_GROW_MEMORY(WASM_GET_LOCAL(0)));
   CHECK_EQ(-1, r.Call(1048575));
 }
@@ -368,7 +364,7 @@ TEST(TestPossibleNondeterminism) {
   {
     int32_t index = 16;
     WasmRunner<int32_t, float> r(kExecuteInterpreted);
-    r.module().AddMemory(WasmModule::kPageSize);
+    r.builder().AddMemory(WasmModule::kPageSize);
     BUILD(r, WASM_STORE_MEM(MachineType::Float32(), WASM_I32V(index),
                             WASM_GET_LOCAL(0)),
           WASM_I32V(index));
@@ -380,7 +376,7 @@ TEST(TestPossibleNondeterminism) {
   {
     int32_t index = 16;
     WasmRunner<int32_t, double> r(kExecuteInterpreted);
-    r.module().AddMemory(WasmModule::kPageSize);
+    r.builder().AddMemory(WasmModule::kPageSize);
     BUILD(r, WASM_STORE_MEM(MachineType::Float64(), WASM_I32V(index),
                             WASM_GET_LOCAL(0)),
           WASM_I32V(index));
@@ -423,11 +419,12 @@ TEST(WasmInterpreterActivations) {
 
 TEST(InterpreterLoadWithoutMemory) {
   WasmRunner<int32_t, int32_t> r(kExecuteInterpreted);
-  r.module().AddMemory(0);
+  r.builder().AddMemory(0);
   BUILD(r, WASM_LOAD_MEM(MachineType::Int32(), WASM_GET_LOCAL(0)));
   CHECK_TRAP32(r.Call(0));
 }
 
+}  // namespace test_run_wasm_interpreter
 }  // namespace wasm
 }  // namespace internal
 }  // namespace v8

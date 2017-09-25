@@ -7,7 +7,6 @@
 #include "src/accessors.h"
 #include "src/arguments.h"
 #include "src/compiler.h"
-#include "src/frames-inl.h"
 #include "src/isolate-inl.h"
 #include "src/messages.h"
 #include "src/wasm/wasm-module.h"
@@ -130,7 +129,8 @@ RUNTIME_FUNCTION(Runtime_SetCode) {
   Handle<SharedFunctionInfo> target_shared(target->shared());
   Handle<SharedFunctionInfo> source_shared(source->shared());
 
-  if (!Compiler::Compile(source, Compiler::KEEP_EXCEPTION)) {
+  if (!source->is_compiled() &&
+      !Compiler::Compile(source, Compiler::KEEP_EXCEPTION)) {
     return isolate->heap()->exception();
   }
 
@@ -151,10 +151,7 @@ RUNTIME_FUNCTION(Runtime_SetCode) {
   target_shared->set_end_position(source_shared->end_position());
   bool was_native = target_shared->native();
   target_shared->set_compiler_hints(source_shared->compiler_hints());
-  target_shared->set_opt_count_and_bailout_reason(
-      source_shared->opt_count_and_bailout_reason());
   target_shared->set_native(was_native);
-  target_shared->set_profiler_ticks(source_shared->profiler_ticks());
   target_shared->set_function_literal_id(source_shared->function_literal_id());
 
   Handle<Object> source_script(source_shared->script(), isolate);
@@ -166,7 +163,6 @@ RUNTIME_FUNCTION(Runtime_SetCode) {
 
   // Set the code of the target function.
   target->ReplaceCode(source_shared->code());
-  DCHECK(target->next_function_link()->IsUndefined(isolate));
 
   Handle<Context> context(source->context());
   target->set_context(*context);
@@ -207,18 +203,6 @@ RUNTIME_FUNCTION(Runtime_IsConstructor) {
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_CHECKED(Object, object, 0);
   return isolate->heap()->ToBoolean(object->IsConstructor());
-}
-
-RUNTIME_FUNCTION(Runtime_SetForceInlineFlag) {
-  SealHandleScope shs(isolate);
-  DCHECK_EQ(1, args.length());
-  CONVERT_ARG_CHECKED(Object, object, 0);
-
-  if (object->IsJSFunction()) {
-    JSFunction* func = JSFunction::cast(object);
-    func->shared()->set_force_inline(true);
-  }
-  return isolate->heap()->undefined_value();
 }
 
 

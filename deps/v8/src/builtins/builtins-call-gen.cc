@@ -7,8 +7,10 @@
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
 #include "src/globals.h"
+#include "src/heap/heap-inl.h"
 #include "src/isolate.h"
 #include "src/macro-assembler.h"
+#include "src/objects/arguments.h"
 
 namespace v8 {
 namespace internal {
@@ -49,13 +51,14 @@ void Builtins::Generate_CallVarargs(MacroAssembler* masm) {
 }
 
 void Builtins::Generate_CallForwardVarargs(MacroAssembler* masm) {
-  Generate_CallOrConstructForwardVarargs(masm,
+  Generate_CallOrConstructForwardVarargs(masm, CallOrConstructMode::kCall,
                                          masm->isolate()->builtins()->Call());
 }
 
 void Builtins::Generate_CallFunctionForwardVarargs(MacroAssembler* masm) {
   Generate_CallOrConstructForwardVarargs(
-      masm, masm->isolate()->builtins()->CallFunction());
+      masm, CallOrConstructMode::kCall,
+      masm->isolate()->builtins()->CallFunction());
 }
 
 void CallOrConstructBuiltinsAssembler::CallOrConstructWithArrayLike(

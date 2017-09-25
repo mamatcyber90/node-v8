@@ -29,17 +29,19 @@
 #include <stdlib.h>
 
 #include "src/assembler-inl.h"
+#include "src/boxed-float.h"
 #include "src/debug/debug.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
 #include "src/double.h"
-#include "src/float.h"
+#include "src/frames-inl.h"
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
 #include "src/v8.h"
 #include "test/cctest/cctest.h"
 
-using namespace v8::internal;
+namespace v8 {
+namespace internal {
 
 template <typename... S>
 bool DisassembleAndCompare(byte* begin, S... expected_strings) {
@@ -1576,3 +1578,6 @@ TEST(LoadStoreExclusive) {
 
   VERIFY_RUN();
 }
+
+}  // namespace internal
+}  // namespace v8

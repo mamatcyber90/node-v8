@@ -7,6 +7,7 @@
 #include <type_traits>
 
 #include "include/v8-value-serializer-version.h"
+#include "src/api.h"
 #include "src/base/logging.h"
 #include "src/conversions.h"
 #include "src/factory.h"
@@ -18,7 +19,7 @@
 #include "src/snapshot/code-serializer.h"
 #include "src/transitions.h"
 #include "src/wasm/wasm-module.h"
-#include "src/wasm/wasm-objects.h"
+#include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-result.h"
 
 namespace v8 {
@@ -1251,6 +1252,7 @@ MaybeHandle<String> ValueDeserializer::ReadTwoByteString() {
 }
 
 bool ValueDeserializer::ReadExpectedString(Handle<String> expected) {
+  DisallowHeapAllocation no_gc;
   // In the case of failure, the position in the stream is reset.
   const uint8_t* original_position = position_;
 
@@ -1265,8 +1267,6 @@ bool ValueDeserializer::ReadExpectedString(Handle<String> expected) {
     return false;
   }
 
-  expected = String::Flatten(expected);
-  DisallowHeapAllocation no_gc;
   String::FlatContent flat = expected->GetFlatContent();
 
   // If the bytes are verbatim what is in the flattened string, then the string
@@ -1755,7 +1755,7 @@ Maybe<uint32_t> ValueDeserializer::ReadJSObjectProperties(
     bool transitioning = true;
     Handle<Map> map(object->map(), isolate_);
     DCHECK(!map->is_dictionary_map());
-    DCHECK(map->instance_descriptors()->IsEmpty());
+    DCHECK_EQ(0, map->instance_descriptors()->number_of_descriptors());
     std::vector<Handle<Object>> properties;
     properties.reserve(8);
 
@@ -1775,10 +1775,11 @@ Maybe<uint32_t> ValueDeserializer::ReadJSObjectProperties(
       // transition was found.
       Handle<Object> key;
       Handle<Map> target;
-      Handle<String> expected_key = TransitionArray::ExpectedTransitionKey(map);
+      TransitionsAccessor transitions(map);
+      Handle<String> expected_key = transitions.ExpectedTransitionKey();
       if (!expected_key.is_null() && ReadExpectedString(expected_key)) {
         key = expected_key;
-        target = TransitionArray::ExpectedTransitionTarget(map);
+        target = transitions.ExpectedTransitionTarget();
       } else {
         if (!ReadObject().ToHandle(&key) || !IsValidObjectKey(key)) {
           return Nothing<uint32_t>();
@@ -1786,8 +1787,9 @@ Maybe<uint32_t> ValueDeserializer::ReadJSObjectProperties(
         if (key->IsString()) {
           key =
               isolate_->factory()->InternalizeString(Handle<String>::cast(key));
-          target = TransitionArray::FindTransitionToField(
-              map, Handle<String>::cast(key));
+          // Don't reuse |transitions| because it could be stale.
+          target = TransitionsAccessor(map).FindTransitionToField(
+              Handle<String>::cast(key));
           transitioning = !target.is_null();
         } else {
           transitioning = false;

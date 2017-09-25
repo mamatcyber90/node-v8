@@ -8,6 +8,7 @@
 #include <memory>
 #include <sstream>
 
+#include "src/api.h"
 #include "src/bailout-reason.h"
 #include "src/base/platform/platform.h"
 #include "src/bootstrapper.h"
@@ -41,7 +42,6 @@ static const char* kLogEventsNames[CodeEventListener::NUMBER_OF_LOG_EVENTS] = {
 static const char* ComputeMarker(SharedFunctionInfo* shared,
                                  AbstractCode* code) {
   switch (code->kind()) {
-    case AbstractCode::FUNCTION:
     case AbstractCode::INTERPRETED_FUNCTION:
       return shared->optimization_disabled() ? "" : "~";
     case AbstractCode::OPTIMIZED_FUNCTION:
@@ -262,8 +262,7 @@ PerfBasicLogger::~PerfBasicLogger() {
 void PerfBasicLogger::LogRecordedBuffer(AbstractCode* code, SharedFunctionInfo*,
                                         const char* name, int length) {
   if (FLAG_perf_basic_prof_only_functions &&
-      (code->kind() != AbstractCode::FUNCTION &&
-       code->kind() != AbstractCode::INTERPRETED_FUNCTION &&
+      (code->kind() != AbstractCode::INTERPRETED_FUNCTION &&
        code->kind() != AbstractCode::OPTIMIZED_FUNCTION)) {
     return;
   }
@@ -739,7 +738,6 @@ Logger::Logger(Isolate* isolate)
       perf_jit_logger_(NULL),
       ll_logger_(NULL),
       jit_logger_(NULL),
-      listeners_(5),
       is_initialized_(false) {}
 
 Logger::~Logger() {
@@ -850,7 +848,7 @@ void Logger::CodeDeoptEvent(Code* code, DeoptKind kind, Address pc,
                         ? static_cast<int>(timer_.Elapsed().InMicroseconds())
                         : -1;
   msg.Append("code-deopt,%d,%d,", since_epoch, code->CodeSize());
-  msg.AppendAddress(code->address());
+  msg.AppendAddress(code->instruction_start());
 
   // Deoptimization position.
   std::ostringstream deopt_location;
@@ -884,7 +882,7 @@ void Logger::CodeDeoptEvent(Code* code, DeoptKind kind, Address pc,
 
 void Logger::CurrentTimeEvent() {
   if (!log_->IsEnabled()) return;
-  DCHECK(FLAG_log_timer_events || FLAG_prof_cpp);
+  DCHECK(FLAG_log_internal_timer_events);
   Log::MessageBuilder msg(log_);
   int since_epoch = static_cast<int>(timer_.Elapsed().InMicroseconds());
   msg.Append("current-time,%d", since_epoch);
@@ -1053,8 +1051,8 @@ void AppendCodeCreateHeader(Log::MessageBuilder* msg,
                       ? static_cast<int>(timer->Elapsed().InMicroseconds())
                       : -1;
   msg->Append("%d,", timestamp);
-  msg->AppendAddress(code->address());
-  msg->Append(",%d,", code->ExecutableSize());
+  msg->AppendAddress(code->instruction_start());
+  msg->Append(",%d,", code->instruction_size());
 }
 
 }  // namespace
@@ -1119,22 +1117,141 @@ void Logger::CodeCreateEvent(CodeEventListener::LogEventsAndTags tag,
                              Name* source, int line, int column) {
   if (!is_logging_code_events()) return;
   if (!FLAG_log_code || !log_->IsEnabled()) return;
-  Log::MessageBuilder msg(log_);
-  AppendCodeCreateHeader(&msg, tag, code, &timer_);
-  std::unique_ptr<char[]> name =
-      shared->DebugName()->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
-  msg.Append("\"%s ", name.get());
-  if (source->IsString()) {
-    std::unique_ptr<char[]> sourcestr = String::cast(source)->ToCString(
-        DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
-    msg.Append("%s", sourcestr.get());
-  } else {
-    msg.AppendSymbolName(Symbol::cast(source));
+
+  {
+    Log::MessageBuilder msg(log_);
+    AppendCodeCreateHeader(&msg, tag, code, &timer_);
+    std::unique_ptr<char[]> name =
+        shared->DebugName()->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
+    msg.Append("\"%s ", name.get());
+    if (source->IsString()) {
+      std::unique_ptr<char[]> sourcestr = String::cast(source)->ToCString(
+          DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
+      msg.Append("%s", sourcestr.get());
+    } else {
+      msg.AppendSymbolName(Symbol::cast(source));
+    }
+    msg.Append(":%d:%d\",", line, column);
+    msg.AppendAddress(shared->address());
+    msg.Append(",%s", ComputeMarker(shared, code));
+    msg.WriteToLogFile();
   }
-  msg.Append(":%d:%d\",", line, column);
-  msg.AppendAddress(shared->address());
-  msg.Append(",%s", ComputeMarker(shared, code));
-  msg.WriteToLogFile();
+
+  if (FLAG_log_source_code) {
+    Object* script_object = shared->script();
+    if (script_object->IsScript()) {
+      // Make sure the script is written to the log file.
+      std::ostringstream os;
+      Script* script = Script::cast(script_object);
+      int script_id = script->id();
+      if (logged_source_code_.find(script_id) == logged_source_code_.end()) {
+        // This script has not been logged yet.
+        logged_source_code_.insert(script_id);
+        Object* source_object = script->source();
+        if (source_object->IsString()) {
+          Log::MessageBuilder msg(log_);
+          String* source_code = String::cast(source_object);
+          os << "script," << script_id << ",\"";
+          msg.AppendUnbufferedCString(os.str().c_str());
+
+          // Log the script name.
+          if (script->name()->IsString()) {
+            msg.AppendUnbufferedHeapString(String::cast(script->name()));
+            msg.AppendUnbufferedCString("\",\"");
+          } else {
+            msg.AppendUnbufferedCString("<unknown>\",\"");
+          }
+
+          // Log the source code.
+          msg.AppendUnbufferedHeapString(source_code);
+          os.str("");
+          os << "\"" << std::endl;
+          msg.AppendUnbufferedCString(os.str().c_str());
+          os.str("");
+        }
+      }
+
+      // We log source code information in the form:
+      //
+      // code-source-info <addr>,<script>,<start>,<end>,<pos>,<inline-pos>,<fns>
+      //
+      // where
+      //   <addr> is code object address
+      //   <script> is script id
+      //   <start> is the starting position inside the script
+      //   <end> is the end position inside the script
+      //   <pos> is source position table encoded in the string,
+      //      it is a sequence of C<code-offset>O<script-offset>[I<inlining-id>]
+      //      where
+      //        <code-offset> is the offset within the code object
+      //        <script-offset> is the position within the script
+      //        <inlining-id> is the offset in the <inlining> table
+      //   <inlining> table is a sequence of strings of the form
+      //      F<function-id>O<script-offset>[I<inlining-id>
+      //      where
+      //         <function-id> is an index into the <fns> function table
+      //   <fns> is the function table encoded as a sequence of strings
+      //      S<shared-function-info-address>
+      os << "code-source-info," << static_cast<void*>(code->instruction_start())
+         << "," << script_id << "," << shared->start_position() << ","
+         << shared->end_position() << ",";
+
+      SourcePositionTableIterator iterator(code->source_position_table());
+      bool is_first = true;
+      bool hasInlined = false;
+      for (; !iterator.done(); iterator.Advance()) {
+        if (is_first) {
+          is_first = false;
+        }
+        SourcePosition pos = iterator.source_position();
+        os << "C" << iterator.code_offset();
+        os << "O" << pos.ScriptOffset();
+        if (pos.isInlined()) {
+          os << "I" << pos.InliningId();
+          hasInlined = true;
+        }
+      }
+      os << ",";
+      int maxInlinedId = -1;
+      if (hasInlined) {
+        PodArray<InliningPosition>* inlining_positions =
+            DeoptimizationInputData::cast(
+                Code::cast(code)->deoptimization_data())
+                ->InliningPositions();
+        for (int i = 0; i < inlining_positions->length(); i++) {
+          InliningPosition inlining_pos = inlining_positions->get(i);
+          os << "F";
+          if (inlining_pos.inlined_function_id != -1) {
+            os << inlining_pos.inlined_function_id;
+            if (inlining_pos.inlined_function_id > maxInlinedId) {
+              maxInlinedId = inlining_pos.inlined_function_id;
+            }
+          }
+          SourcePosition pos = inlining_pos.position;
+          os << "O" << pos.ScriptOffset();
+          if (pos.isInlined()) {
+            os << "I" << pos.InliningId();
+          }
+        }
+      }
+      os << ",";
+      if (hasInlined) {
+        DeoptimizationInputData* deopt_data = DeoptimizationInputData::cast(
+            Code::cast(code)->deoptimization_data());
+
+        os << std::hex;
+        for (int i = 0; i <= maxInlinedId; i++) {
+          os << "S"
+             << static_cast<void*>(
+                    deopt_data->GetInlinedFunction(i)->address());
+        }
+        os << std::dec;
+      }
+      os << std::endl;
+      Log::MessageBuilder msg(log_);
+      msg.AppendUnbufferedCString(os.str().c_str());
+    }
+  }
 }
 
 void Logger::CodeCreateEvent(CodeEventListener::LogEventsAndTags tag,
@@ -1164,7 +1281,7 @@ void Logger::CodeDisableOptEvent(AbstractCode* code,
 void Logger::CodeMovingGCEvent() {
   if (!is_logging_code_events()) return;
   if (!log_->IsEnabled() || !FLAG_ll_prof) return;
-  base::OS::SignalCodeMovingGC();
+  base::OS::SignalCodeMovingGC(GetRandomMmapAddr());
 }
 
 void Logger::RegExpCodeCreateEvent(AbstractCode* code, String* source) {
@@ -1239,7 +1356,7 @@ void Logger::ResourceEvent(const char* name, const char* tag) {
   if (base::OS::GetUserTime(&sec, &usec) != -1) {
     msg.Append("%d,%d,", sec, usec);
   }
-  msg.Append("%.0f", base::OS::TimeCurrentMillis());
+  msg.Append("%.0f", V8::GetCurrentPlatform()->CurrentClockTimeMillis());
   msg.WriteToLogFile();
 }
 
@@ -1270,7 +1387,7 @@ void Logger::HeapSampleBeginEvent(const char* space, const char* kind) {
   // Using non-relative system time in order to be able to synchronize with
   // external memory profiling events (e.g. DOM memory size).
   msg.Append("heap-sample-begin,\"%s\",\"%s\",%.0f", space, kind,
-             base::OS::TimeCurrentMillis());
+             V8::GetCurrentPlatform()->CurrentClockTimeMillis());
   msg.WriteToLogFile();
 }
 
@@ -1362,34 +1479,6 @@ void Logger::ICEvent(const char* type, bool keyed, const Address pc, int line,
   msg.WriteToLogFile();
 }
 
-void Logger::CompareIC(const Address pc, int line, int column, Code* stub,
-                       const char* op, const char* old_left,
-                       const char* old_right, const char* old_state,
-                       const char* new_left, const char* new_right,
-                       const char* new_state) {
-  if (!log_->IsEnabled() || !FLAG_trace_ic) return;
-  Log::MessageBuilder msg(log_);
-  msg.Append("CompareIC,");
-  msg.AppendAddress(pc);
-  msg.Append(",%d,%d,", line, column);
-  msg.AppendAddress(reinterpret_cast<Address>(stub));
-  msg.Append(",%s,%s,%s,%s,%s,%s,%s", op, old_left, old_right, old_state,
-             new_left, new_right, new_state);
-  msg.WriteToLogFile();
-}
-
-void Logger::PatchIC(const Address pc, const Address test, int delta) {
-  if (!log_->IsEnabled() || !FLAG_trace_ic) return;
-  Log::MessageBuilder msg(log_);
-  msg.Append("PatchIC,");
-  msg.AppendAddress(pc);
-  msg.Append(",");
-  msg.AppendAddress(test);
-  msg.Append(",");
-  msg.Append("%d,", delta);
-  msg.WriteToLogFile();
-}
-
 void Logger::StopProfiler() {
   if (!log_->IsEnabled()) return;
   if (profiler_ != NULL) {
@@ -1418,32 +1507,6 @@ static void AddFunctionAndCode(SharedFunctionInfo* sfi,
   }
 }
 
-class EnumerateOptimizedFunctionsVisitor: public OptimizedFunctionVisitor {
- public:
-  EnumerateOptimizedFunctionsVisitor(Handle<SharedFunctionInfo>* sfis,
-                                     Handle<AbstractCode>* code_objects,
-                                     int* count)
-      : sfis_(sfis), code_objects_(code_objects), count_(count) {}
-
-  virtual void VisitFunction(JSFunction* function) {
-    SharedFunctionInfo* sfi = SharedFunctionInfo::cast(function->shared());
-    Object* maybe_script = sfi->script();
-    if (maybe_script->IsScript()
-        && !Script::cast(maybe_script)->HasValidSource()) return;
-
-    DCHECK(function->abstract_code()->kind() ==
-           AbstractCode::OPTIMIZED_FUNCTION);
-    AddFunctionAndCode(sfi, function->abstract_code(), sfis_, code_objects_,
-                       *count_);
-    *count_ = *count_ + 1;
-  }
-
- private:
-  Handle<SharedFunctionInfo>* sfis_;
-  Handle<AbstractCode>* code_objects_;
-  int* count_;
-};
-
 static int EnumerateCompiledFunctions(Heap* heap,
                                       Handle<SharedFunctionInfo>* sfis,
                                       Handle<AbstractCode>* code_objects) {
@@ -1454,33 +1517,42 @@ static int EnumerateCompiledFunctions(Heap* heap,
   // Iterate the heap to find shared function info objects and record
   // the unoptimized code for them.
   for (HeapObject* obj = iterator.next(); obj != NULL; obj = iterator.next()) {
-    if (!obj->IsSharedFunctionInfo()) continue;
-    SharedFunctionInfo* sfi = SharedFunctionInfo::cast(obj);
-    if (sfi->is_compiled()
-        && (!sfi->script()->IsScript()
-            || Script::cast(sfi->script())->HasValidSource())) {
-      // In some cases, an SFI might have (and have executing!) both bytecode
-      // and baseline code, so check for both and add them both if needed.
-      if (sfi->HasBytecodeArray()) {
-        AddFunctionAndCode(sfi, AbstractCode::cast(sfi->bytecode_array()), sfis,
-                           code_objects, compiled_funcs_count);
-        ++compiled_funcs_count;
-      }
+    if (obj->IsSharedFunctionInfo()) {
+      SharedFunctionInfo* sfi = SharedFunctionInfo::cast(obj);
+      if (sfi->is_compiled() &&
+          (!sfi->script()->IsScript() ||
+           Script::cast(sfi->script())->HasValidSource())) {
+        // In some cases, an SFI might have (and have executing!) both bytecode
+        // and baseline code, so check for both and add them both if needed.
+        if (sfi->HasBytecodeArray()) {
+          AddFunctionAndCode(sfi, AbstractCode::cast(sfi->bytecode_array()),
+                             sfis, code_objects, compiled_funcs_count);
+          ++compiled_funcs_count;
+        }
 
-      if (!sfi->IsInterpreted()) {
-        AddFunctionAndCode(sfi, AbstractCode::cast(sfi->code()), sfis,
+        if (!sfi->IsInterpreted()) {
+          AddFunctionAndCode(sfi, AbstractCode::cast(sfi->code()), sfis,
+                             code_objects, compiled_funcs_count);
+          ++compiled_funcs_count;
+        }
+      }
+    } else if (obj->IsJSFunction()) {
+      // Given that we no longer iterate over all optimized JSFunctions, we need
+      // to take care of this here.
+      JSFunction* function = JSFunction::cast(obj);
+      SharedFunctionInfo* sfi = SharedFunctionInfo::cast(function->shared());
+      Object* maybe_script = sfi->script();
+      if (maybe_script->IsScript() &&
+          !Script::cast(maybe_script)->HasValidSource()) {
+        continue;
+      }
+      if (function->HasOptimizedCode()) {
+        AddFunctionAndCode(sfi, AbstractCode::cast(function->code()), sfis,
                            code_objects, compiled_funcs_count);
         ++compiled_funcs_count;
       }
     }
   }
-
-  // Iterate all optimized functions in all contexts.
-  EnumerateOptimizedFunctionsVisitor visitor(sfis,
-                                             code_objects,
-                                             &compiled_funcs_count);
-  Deoptimizer::VisitAllOptimizedFunctions(heap->isolate(), &visitor);
-
   return compiled_funcs_count;
 }
 
@@ -1490,14 +1562,11 @@ void Logger::LogCodeObject(Object* object) {
   CodeEventListener::LogEventsAndTags tag = CodeEventListener::STUB_TAG;
   const char* description = "Unknown code from the snapshot";
   switch (code_object->kind()) {
-    case AbstractCode::FUNCTION:
     case AbstractCode::INTERPRETED_FUNCTION:
     case AbstractCode::OPTIMIZED_FUNCTION:
       return;  // We log this later using LogCompiledFunctions.
     case AbstractCode::BYTECODE_HANDLER:
       return;  // We log it later by walking the dispatch table.
-    case AbstractCode::COMPARE_IC:      // fall through
-
     case AbstractCode::STUB:
       description =
           CodeStub::MajorName(CodeStub::GetMajorKey(code_object->GetCode()));
@@ -1556,6 +1625,10 @@ void Logger::LogCodeObject(Object* object) {
       break;
     case AbstractCode::WASM_INTERPRETER_ENTRY:
       description = "A Wasm to Interpreter adapter";
+      tag = CodeEventListener::STUB_TAG;
+      break;
+    case AbstractCode::C_WASM_ENTRY:
+      description = "A C to Wasm entry stub";
       tag = CodeEventListener::STUB_TAG;
       break;
     case AbstractCode::NUMBER_OF_KINDS:
@@ -1660,7 +1733,7 @@ void Logger::LogCompiledFunctions() {
   // During iteration, there can be heap allocation due to
   // GetScriptLineNumber call.
   for (int i = 0; i < compiled_funcs_count; ++i) {
-    if (code_objects[i].is_identical_to(isolate_->builtins()->CompileLazy()))
+    if (code_objects[i].is_identical_to(BUILTIN_CODE(isolate_, CompileLazy)))
       continue;
     LogExistingFunction(sfis[i], code_objects[i]);
   }
@@ -1725,7 +1798,8 @@ static void PrepareLogFileName(std::ostream& os,  // NOLINT
           break;
         case 't':
           // %t expands to the current time in milliseconds.
-          os << static_cast<int64_t>(base::OS::TimeCurrentMillis());
+          os << static_cast<int64_t>(
+              V8::GetCurrentPlatform()->CurrentClockTimeMillis());
           break;
         case '%':
           // %% expands (contracts really) to %.
@@ -1750,6 +1824,7 @@ bool Logger::SetUp(Isolate* isolate) {
   is_initialized_ = true;
 
   std::ostringstream log_file_name;
+  std::ostringstream source_log_file_name;
   PrepareLogFileName(log_file_name, isolate, FLAG_logfile);
   log_->Initialize(log_file_name.str().c_str());
 

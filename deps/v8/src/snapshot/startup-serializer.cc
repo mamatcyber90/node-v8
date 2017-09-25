@@ -4,6 +4,7 @@
 
 #include "src/snapshot/startup-serializer.h"
 
+#include "src/api.h"
 #include "src/objects-inl.h"
 #include "src/v8threads.h"
 
@@ -22,7 +23,7 @@ StartupSerializer::StartupSerializer(
 }
 
 StartupSerializer::~StartupSerializer() {
-  RestoreExternalReferenceRedirectors(&accessor_infos_);
+  RestoreExternalReferenceRedirectors(accessor_infos_);
   OutputStatistics("StartupSerializer");
 }
 
@@ -30,34 +31,24 @@ void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
                                         WhereToPoint where_to_point, int skip) {
   DCHECK(!obj->IsJSFunction());
 
-  if (clear_function_code_) {
-    if (obj->IsCode()) {
-      Code* code = Code::cast(obj);
-      // If the function code is compiled (either as native code or bytecode),
-      // replace it with lazy-compile builtin. Only exception is when we are
-      // serializing the canonical interpreter-entry-trampoline builtin.
-      if (code->kind() == Code::FUNCTION ||
-          (!serializing_builtins_ &&
-           code->is_interpreter_trampoline_builtin())) {
-        obj = isolate()->builtins()->builtin(Builtins::kCompileLazy);
-      }
-    } else if (obj->IsBytecodeArray()) {
-      obj = isolate()->heap()->undefined_value();
-    }
-  } else if (obj->IsCode()) {
-    Code* code = Code::cast(obj);
-    if (code->kind() == Code::FUNCTION) {
-      code->ClearInlineCaches();
-    }
+  if (clear_function_code() && obj->IsBytecodeArray()) {
+    obj = isolate()->heap()->undefined_value();
   }
 
+  BuiltinReferenceSerializationMode mode =
+      (clear_function_code() && !serializing_builtins_)
+          ? kCanonicalizeCompileLazy
+          : kDefault;
+  if (SerializeBuiltinReference(obj, how_to_code, where_to_point, skip, mode)) {
+    return;
+  }
   if (SerializeHotObject(obj, how_to_code, where_to_point, skip)) return;
 
-  int root_index = root_index_map_.Lookup(obj);
+  int root_index = root_index_map()->Lookup(obj);
   // We can only encode roots as such if it has already been serialized.
   // That applies to root indices below the wave front.
   if (root_index != RootIndexMap::kInvalidRootIndex) {
-    if (root_has_been_serialized_.test(root_index)) {
+    if (root_has_been_serialized(root_index)) {
       PutRoot(root_index, obj, how_to_code, where_to_point, skip);
       return;
     }
@@ -67,15 +58,21 @@ void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
 
   FlushSkip(skip);
 
-  if (isolate_->external_reference_redirector() && obj->IsAccessorInfo()) {
+  if (isolate()->external_reference_redirector() && obj->IsAccessorInfo()) {
     // Wipe external reference redirects in the accessor info.
     AccessorInfo* info = AccessorInfo::cast(obj);
     Address original_address = Foreign::cast(info->getter())->foreign_address();
     Foreign::cast(info->js_getter())->set_foreign_address(original_address);
-    accessor_infos_.Add(info);
+    accessor_infos_.push_back(info);
   } else if (obj->IsScript() && Script::cast(obj)->IsUserJavaScript()) {
     Script::cast(obj)->set_context_data(
-        isolate_->heap()->uninitialized_symbol());
+        isolate()->heap()->uninitialized_symbol());
+  } else if (obj->IsSharedFunctionInfo()) {
+    // Clear inferred name for native functions.
+    SharedFunctionInfo* shared = SharedFunctionInfo::cast(obj);
+    if (!shared->IsSubjectToDebugging() && shared->HasInferredName()) {
+      shared->set_inferred_name(isolate()->heap()->empty_string());
+    }
   }
 
   if (obj->IsHashTable()) CheckRehashability(obj);
@@ -84,15 +81,6 @@ void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
   ObjectSerializer object_serializer(this, obj, &sink_, how_to_code,
                                      where_to_point);
   object_serializer.Serialize();
-
-  if (serializing_immortal_immovables_roots_ &&
-      root_index != RootIndexMap::kInvalidRootIndex) {
-    // Make sure that the immortal immovable root has been included in the first
-    // chunk of its reserved space , so that it is deserialized onto the first
-    // page of its space and stays immortal immovable.
-    SerializerReference ref = reference_map_.Lookup(obj);
-    CHECK(ref.is_back_reference() && ref.chunk_index() == 0);
-  }
 }
 
 void StartupSerializer::SerializeWeakReferencesAndDeferred() {
@@ -137,7 +125,7 @@ void StartupSerializer::SerializeStrongReferences() {
   serializing_immortal_immovables_roots_ = true;
   isolate->heap()->IterateStrongRoots(this, VISIT_ONLY_STRONG_ROOT_LIST);
   // Check that immortal immovable roots are allocated on the first page.
-  CHECK(HasNotExceededFirstPageOfEachSpace());
+  DCHECK(allocator()->HasNotExceededFirstPageOfEachSpace());
   serializing_immortal_immovables_roots_ = false;
   // Visit the rest of the strong roots.
   // Clear the stack limits to make the snapshot reproducible.
@@ -196,11 +184,29 @@ void StartupSerializer::CheckRehashability(HeapObject* table) {
   if (!can_be_rehashed_) return;
   // We can only correctly rehash if the four hash tables below are the only
   // ones that we deserialize.
-  if (table == isolate_->heap()->empty_slow_element_dictionary()) return;
-  if (table == isolate_->heap()->empty_property_dictionary()) return;
-  if (table == isolate_->heap()->weak_object_to_code_table()) return;
-  if (table == isolate_->heap()->string_table()) return;
+  if (table->IsUnseededNumberDictionary()) return;
+  if (table == isolate()->heap()->empty_ordered_hash_table()) return;
+  if (table == isolate()->heap()->empty_slow_element_dictionary()) return;
+  if (table == isolate()->heap()->empty_property_dictionary()) return;
+  if (table == isolate()->heap()->weak_object_to_code_table()) return;
+  if (table == isolate()->heap()->string_table()) return;
   can_be_rehashed_ = false;
+}
+
+bool StartupSerializer::MustBeDeferred(HeapObject* object) {
+  if (root_has_been_serialized_.test(Heap::kFreeSpaceMapRootIndex) &&
+      root_has_been_serialized_.test(Heap::kOnePointerFillerMapRootIndex) &&
+      root_has_been_serialized_.test(Heap::kTwoPointerFillerMapRootIndex)) {
+    // All required root objects are serialized, so any aligned objects can
+    // be saved without problems.
+    return false;
+  }
+  // Just defer everything except of Map objects until all required roots are
+  // serialized. Some objects may have special alignment requirements, that may
+  // not be fulfilled during deserialization until few first root objects are
+  // serialized. But we must serialize Map objects since deserializer checks
+  // that these root objects are indeed Maps.
+  return !object->IsMap();
 }
 
 }  // namespace internal

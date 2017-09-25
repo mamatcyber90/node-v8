@@ -28,17 +28,18 @@
 #include <stdlib.h>
 #include <iostream>  // NOLINT(readability/streams)
 
+#include "src/api.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/macro-assembler.h"
 #include "src/mips/macro-assembler-mips.h"
 #include "src/mips/simulator-mips.h"
+#include "src/objects-inl.h"
 #include "src/v8.h"
 #include "test/cctest/cctest.h"
 
+namespace v8 {
+namespace internal {
 
-using namespace v8::internal;
-
-typedef void* (*F)(int x, int y, int p2, int p3, int p4);
 typedef Object* (*F1)(int x, int p1, int p2, int p3, int p4);
 typedef Object* (*F3)(void* p, int p1, int p2, int p3, int p4);
 typedef Object* (*F4)(void* p0, void* p1, int p2, int p3, int p4);
@@ -95,7 +96,7 @@ TEST(BYTESWAP) {
   masm->GetCode(isolate, &desc);
   Handle<Code> code = isolate->factory()->NewCode(
       desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
-  ::F3 f = FUNCTION_CAST<::F3>(code->entry());
+  F3 f = FUNCTION_CAST<F3>(code->entry());
   t.r1 = 0x781A15C3;
   t.r2 = 0x2CDE;
   t.r3 = 0x9F;
@@ -1008,8 +1009,8 @@ TEST(min_max_nan) {
 
   auto handle_dnan = [masm](FPURegister dst, Label* nan, Label* back) {
     __ bind(nan);
-    __ LoadRoot(at, Heap::kNanValueRootIndex);
-    __ Ldc1(dst, FieldMemOperand(at, HeapNumber::kValueOffset));
+    __ LoadRoot(t8, Heap::kNanValueRootIndex);
+    __ Ldc1(dst, FieldMemOperand(t8, HeapNumber::kValueOffset));
     __ Branch(back);
   };
 
@@ -1053,7 +1054,7 @@ TEST(min_max_nan) {
   masm->GetCode(isolate, &desc);
   Handle<Code> code = isolate->factory()->NewCode(
       desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
-  ::F3 f = FUNCTION_CAST<::F3>(code->entry());
+  F3 f = FUNCTION_CAST<F3>(code->entry());
   for (int i = 0; i < kTableLength; i++) {
     test.a = inputsa[i];
     test.b = inputsb[i];
@@ -1366,7 +1367,7 @@ TEST(Sltu) {
 }
 
 template <typename T, typename Inputs, typename Results>
-static ::F4 GenerateMacroFloat32MinMax(MacroAssembler* masm) {
+static F4 GenerateMacroFloat32MinMax(MacroAssembler* masm) {
   T a = T::from_code(4);  // f4
   T b = T::from_code(6);  // f6
   T c = T::from_code(8);  // f8
@@ -1436,7 +1437,7 @@ static ::F4 GenerateMacroFloat32MinMax(MacroAssembler* masm) {
   OFStream os(stdout);
   code->Print(os);
 #endif
-  return FUNCTION_CAST<::F4>(code->entry());
+  return FUNCTION_CAST<F4>(code->entry());
 }
 
 TEST(macro_float_minmax_f32) {
@@ -1465,7 +1466,7 @@ TEST(macro_float_minmax_f32) {
     float max_aba_;
   };
 
-  ::F4 f = GenerateMacroFloat32MinMax<FPURegister, Inputs, Results>(masm);
+  F4 f = GenerateMacroFloat32MinMax<FPURegister, Inputs, Results>(masm);
   Object* dummy = nullptr;
   USE(dummy);
 
@@ -1509,7 +1510,7 @@ TEST(macro_float_minmax_f32) {
 }
 
 template <typename T, typename Inputs, typename Results>
-static ::F4 GenerateMacroFloat64MinMax(MacroAssembler* masm) {
+static F4 GenerateMacroFloat64MinMax(MacroAssembler* masm) {
   T a = T::from_code(4);  // f4
   T b = T::from_code(6);  // f6
   T c = T::from_code(8);  // f8
@@ -1579,7 +1580,7 @@ static ::F4 GenerateMacroFloat64MinMax(MacroAssembler* masm) {
   OFStream os(stdout);
   code->Print(os);
 #endif
-  return FUNCTION_CAST<::F4>(code->entry());
+  return FUNCTION_CAST<F4>(code->entry());
 }
 
 TEST(macro_float_minmax_f64) {
@@ -1608,7 +1609,7 @@ TEST(macro_float_minmax_f64) {
     double max_aba_;
   };
 
-  ::F4 f = GenerateMacroFloat64MinMax<DoubleRegister, Inputs, Results>(masm);
+  F4 f = GenerateMacroFloat64MinMax<DoubleRegister, Inputs, Results>(masm);
   Object* dummy = nullptr;
   USE(dummy);
 
@@ -1652,3 +1653,6 @@ TEST(macro_float_minmax_f64) {
 }
 
 #undef __
+
+}  // namespace internal
+}  // namespace v8

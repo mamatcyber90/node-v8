@@ -7,6 +7,7 @@
 #include "src/arguments.h"
 #include "src/conversions.h"
 #include "src/factory.h"
+#include "src/frames.h"
 #include "src/isolate-inl.h"
 #include "src/messages.h"
 #include "src/objects-inl.h"
@@ -612,6 +613,16 @@ class ElementsAccessorBase : public ElementsAccessor {
                              PropertyFilter filter = ALL_PROPERTIES) {
     return Subclass::GetEntryForIndexImpl(isolate, holder, backing_store, index,
                                           filter) != kMaxUInt32;
+  }
+
+  bool HasEntry(JSObject* holder, uint32_t entry) final {
+    return Subclass::HasEntryImpl(holder->GetIsolate(), holder->elements(),
+                                  entry);
+  }
+
+  static bool HasEntryImpl(Isolate* isolate, FixedArrayBase* backing_store,
+                           uint32_t entry) {
+    UNIMPLEMENTED();
   }
 
   bool HasAccessors(JSObject* holder) final {
@@ -1316,13 +1327,15 @@ class ElementsAccessorBase : public ElementsAccessor {
     return Subclass::GetDetailsImpl(holder, entry);
   }
 
-  Handle<FixedArray> CreateListFromArray(Isolate* isolate,
-                                         Handle<JSArray> array) final {
-    return Subclass::CreateListFromArrayImpl(isolate, array);
+  Handle<FixedArray> CreateListFromArrayLike(Isolate* isolate,
+                                             Handle<JSObject> object,
+                                             uint32_t length) final {
+    return Subclass::CreateListFromArrayLikeImpl(isolate, object, length);
   };
 
-  static Handle<FixedArray> CreateListFromArrayImpl(Isolate* isolate,
-                                                    Handle<JSArray> array) {
+  static Handle<FixedArray> CreateListFromArrayLikeImpl(Isolate* isolate,
+                                                        Handle<JSObject> object,
+                                                        uint32_t length) {
     UNREACHABLE();
   }
 
@@ -2265,7 +2278,7 @@ class FastElementsAccessor : public ElementsAccessorBase<Subclass, KindTraits> {
           }
           return Just(false);
         } else {
-          // Seach for The Hole in HOLEY_DOUBLE_ELEMENTS
+          // Search for The Hole in HOLEY_DOUBLE_ELEMENTS
           DCHECK_EQ(Subclass::kind(), HOLEY_DOUBLE_ELEMENTS);
           auto elements = FixedDoubleArray::cast(receiver->elements());
 
@@ -2365,14 +2378,13 @@ class FastElementsAccessor : public ElementsAccessorBase<Subclass, KindTraits> {
     }
   }
 
-  static Handle<FixedArray> CreateListFromArrayImpl(Isolate* isolate,
-                                                    Handle<JSArray> array) {
-    uint32_t length = 0;
-    array->length()->ToArrayLength(&length);
+  static Handle<FixedArray> CreateListFromArrayLikeImpl(Isolate* isolate,
+                                                        Handle<JSObject> object,
+                                                        uint32_t length) {
     Handle<FixedArray> result = isolate->factory()->NewFixedArray(length);
-    Handle<FixedArrayBase> elements(array->elements(), isolate);
+    Handle<FixedArrayBase> elements(object->elements(), isolate);
     for (uint32_t i = 0; i < length; i++) {
-      if (!Subclass::HasElementImpl(isolate, *array, i, *elements)) continue;
+      if (!Subclass::HasElementImpl(isolate, *object, i, *elements)) continue;
       Handle<Object> value;
       value = Subclass::GetImpl(isolate, *elements, i);
       if (value->IsName()) {
@@ -3081,6 +3093,20 @@ class TypedElementsAccessor
 
     ctype* data = static_cast<ctype*>(elements->DataPtr());
     std::reverse(data, data + len);
+  }
+
+  static Handle<FixedArray> CreateListFromArrayLikeImpl(Isolate* isolate,
+                                                        Handle<JSObject> object,
+                                                        uint32_t length) {
+    DCHECK(!WasNeutered(*object));
+    DCHECK(object->IsJSTypedArray());
+    Handle<FixedArray> result = isolate->factory()->NewFixedArray(length);
+    Handle<BackingStore> elements(BackingStore::cast(object->elements()));
+    for (uint32_t i = 0; i < length; i++) {
+      Handle<Object> value = AccessorClass::GetImpl(isolate, *elements, i);
+      result->set(i, *value);
+    }
+    return result;
   }
 
   static Handle<JSObject> SliceWithResultImpl(Handle<JSObject> receiver,

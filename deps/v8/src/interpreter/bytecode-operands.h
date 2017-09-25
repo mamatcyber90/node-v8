@@ -35,7 +35,8 @@ namespace interpreter {
 #define UNSIGNED_FIXED_SCALAR_OPERAND_TYPE_LIST(V)    \
   V(Flag8, OperandTypeInfo::kFixedUnsignedByte)       \
   V(IntrinsicId, OperandTypeInfo::kFixedUnsignedByte) \
-  V(RuntimeId, OperandTypeInfo::kFixedUnsignedShort)
+  V(RuntimeId, OperandTypeInfo::kFixedUnsignedShort)  \
+  V(NativeContextIndex, OperandTypeInfo::kScalableUnsignedByte)
 
 // Carefully ordered for operand type range checks below.
 #define NON_REGISTER_OPERAND_TYPE_LIST(V)       \
@@ -135,6 +136,9 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
 
 class BytecodeOperands {
  public:
+  // The total number of bytecodes used.
+  static const int kOperandTypeCount = static_cast<int>(OperandType::kLast) + 1;
+
   // Returns true if |accumulator_use| reads the accumulator.
   static constexpr bool ReadsAccumulator(AccumulatorUse accumulator_use) {
     return accumulator_use == AccumulatorUse::kRead ||

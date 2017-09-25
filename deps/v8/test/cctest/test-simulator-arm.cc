@@ -29,18 +29,19 @@
 #include "test/cctest/cctest.h"
 
 #include "src/arm/simulator-arm.h"
+#include "src/assembler-inl.h"
 #include "src/disassembler.h"
 #include "src/factory.h"
 #include "src/macro-assembler.h"
+
+namespace v8 {
+namespace internal {
 
 #if defined(USE_SIMULATOR)
 
 #ifndef V8_TARGET_LITTLE_ENDIAN
 #error Expected ARM to be little-endian
 #endif
-
-using namespace v8::base;
-using namespace v8::internal;
 
 // Define these function prototypes to match JSEntryFunction in execution.cc.
 typedef Object* (*F1)(int x, int p1, int p2, int p3, int p4);
@@ -385,3 +386,6 @@ TEST(simulator_invalidate_exclusive_access_threaded) {
 #undef __
 
 #endif  // USE_SIMULATOR
+
+}  // namespace internal
+}  // namespace v8

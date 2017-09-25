@@ -7,7 +7,7 @@
 #include "src/compiler/node-properties.h"
 #include "src/compiler/pipeline.h"
 #include "src/compiler/scheduler.h"
-#include "src/objects-inl.h"
+#include "src/factory-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -33,6 +33,14 @@ RawMachineAssembler::RawMachineAssembler(
         AddNode(common()->Parameter(static_cast<int>(i)), graph->start());
   }
   graph->SetEnd(graph->NewNode(common_.End(0)));
+}
+
+Node* RawMachineAssembler::NullConstant() {
+  return HeapConstant(isolate()->factory()->null_value());
+}
+
+Node* RawMachineAssembler::UndefinedConstant() {
+  return HeapConstant(isolate()->factory()->undefined_value());
 }
 
 Node* RawMachineAssembler::RelocatableIntPtrConstant(intptr_t value,
@@ -164,6 +172,10 @@ void RawMachineAssembler::PopAndReturn(Node* pop, Node* v1, Node* v2,
   current_block_ = nullptr;
 }
 
+void RawMachineAssembler::DebugAbort(Node* message) {
+  AddNode(machine()->DebugAbort(), message);
+}
+
 void RawMachineAssembler::DebugBreak() { AddNode(machine()->DebugBreak()); }
 
 void RawMachineAssembler::Unreachable() {
@@ -226,6 +238,20 @@ Node* RawMachineAssembler::CallCFunction1(MachineType return_type,
   return AddNode(common()->Call(descriptor), function, arg0);
 }
 
+Node* RawMachineAssembler::CallCFunction1WithCallerSavedRegisters(
+    MachineType return_type, MachineType arg0_type, Node* function, Node* arg0,
+    SaveFPRegsMode mode) {
+  MachineSignature::Builder builder(zone(), 1, 1);
+  builder.AddReturn(return_type);
+  builder.AddParam(arg0_type);
+  CallDescriptor* descriptor =
+      Linkage::GetSimplifiedCDescriptor(zone(), builder.Build());
+
+  descriptor->set_save_fp_mode(mode);
+
+  return AddNode(common()->CallWithCallerSavedRegisters(descriptor), function,
+                 arg0);
+}
 
 Node* RawMachineAssembler::CallCFunction2(MachineType return_type,
                                           MachineType arg0_type,
@@ -255,6 +281,24 @@ Node* RawMachineAssembler::CallCFunction3(MachineType return_type,
       Linkage::GetSimplifiedCDescriptor(zone(), builder.Build());
 
   return AddNode(common()->Call(descriptor), function, arg0, arg1, arg2);
+}
+
+Node* RawMachineAssembler::CallCFunction3WithCallerSavedRegisters(
+    MachineType return_type, MachineType arg0_type, MachineType arg1_type,
+    MachineType arg2_type, Node* function, Node* arg0, Node* arg1, Node* arg2,
+    SaveFPRegsMode mode) {
+  MachineSignature::Builder builder(zone(), 1, 3);
+  builder.AddReturn(return_type);
+  builder.AddParam(arg0_type);
+  builder.AddParam(arg1_type);
+  builder.AddParam(arg2_type);
+  CallDescriptor* descriptor =
+      Linkage::GetSimplifiedCDescriptor(zone(), builder.Build());
+
+  descriptor->set_save_fp_mode(mode);
+
+  return AddNode(common()->CallWithCallerSavedRegisters(descriptor), function,
+                 arg0, arg1, arg2);
 }
 
 Node* RawMachineAssembler::CallCFunction6(

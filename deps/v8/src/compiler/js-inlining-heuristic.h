@@ -50,6 +50,7 @@ class JSInliningHeuristic final : public AdvancedReducer {
     int num_functions;
     Node* node = nullptr;     // The call site at which to inline.
     CallFrequency frequency;  // Relative frequency of this call site.
+    int total_size = 0;
   };
 
   // Comparator for candidates.
@@ -62,7 +63,18 @@ class JSInliningHeuristic final : public AdvancedReducer {
 
   // Dumps candidates to console.
   void PrintCandidates();
-  Reduction InlineCandidate(Candidate const& candidate, bool force_inline);
+  Reduction InlineCandidate(Candidate const& candidate, bool small_function);
+  void CreateOrReuseDispatch(Node* node, Node* callee,
+                             Candidate const& candidate, Node** if_successes,
+                             Node** calls, Node** inputs, int input_count);
+  bool TryReuseDispatch(Node* node, Node* callee, Candidate const& candidate,
+                        Node** if_successes, Node** calls, Node** inputs,
+                        int input_count);
+  enum StateCloneMode { kCloneState, kChangeInPlace };
+  Node* DuplicateFrameStateAndRename(Node* frame_state, Node* from, Node* to,
+                                     StateCloneMode mode);
+  Node* DuplicateStateValuesAndRename(Node* state_values, Node* from, Node* to,
+                                      StateCloneMode mode);
 
   CommonOperatorBuilder* common() const;
   Graph* graph() const;

@@ -66,7 +66,7 @@ void V8::InitializeOncePerProcessImpl() {
     FLAG_max_semi_space_size = 1;
   }
 
-  base::OS::Initialize(FLAG_random_seed, FLAG_hard_abort, FLAG_gc_fake_mmap);
+  base::OS::Initialize(FLAG_hard_abort, FLAG_gc_fake_mmap);
 
   Isolate::InitializeOncePerProcess();
 
@@ -130,4 +130,9 @@ void V8::SetSnapshotBlob(StartupData* snapshot_blob) {
 #endif
 }
 }  // namespace internal
+
+// static
+double Platform::SystemClockTimeMillis() {
+  return base::OS::TimeCurrentMillis();
+}
 }  // namespace v8

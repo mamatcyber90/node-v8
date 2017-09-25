@@ -38,7 +38,8 @@
 #include "test/cctest/cctest.h"
 #include "test/cctest/test-code-stubs.h"
 
-using namespace v8::internal;
+namespace v8 {
+namespace internal {
 
 #define __ masm.
 
@@ -75,8 +76,7 @@ ConvertDToIFunc MakeConvertDToIFuncTrampoline(Isolate* isolate,
   int source_reg_offset = kDoubleSize;
   int reg_num = 0;
   for (; reg_num < Register::kNumRegisters; ++reg_num) {
-    if (RegisterConfiguration::Crankshaft()->IsAllocatableGeneralCode(
-            reg_num)) {
+    if (RegisterConfiguration::Default()->IsAllocatableGeneralCode(reg_num)) {
       Register reg = Register::from_code(reg_num);
       if (!reg.is(destination_reg)) {
         queue.Queue(reg);
@@ -105,8 +105,7 @@ ConvertDToIFunc MakeConvertDToIFuncTrampoline(Isolate* isolate,
 
   // // Make sure no registers have been unexpectedly clobbered
   for (--reg_num; reg_num >= 0; --reg_num) {
-    if (RegisterConfiguration::Crankshaft()->IsAllocatableGeneralCode(
-            reg_num)) {
+    if (RegisterConfiguration::Default()->IsAllocatableGeneralCode(reg_num)) {
       Register reg = Register::from_code(reg_num);
       if (!reg.is(destination_reg)) {
         __ Pop(ip0);
@@ -195,3 +194,6 @@ TEST(ConvertDToI) {
     }
   }
 }
+
+}  // namespace internal
+}  // namespace v8

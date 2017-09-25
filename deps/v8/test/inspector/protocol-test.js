@@ -129,7 +129,7 @@ InspectorTest.ContextGroup = class {
     return new InspectorTest.Session(this);
   }
 
-  setupInjectedScriptEnvironment(debug) {
+  setupInjectedScriptEnvironment(session) {
     let scriptSource = '';
     // First define all getters on Object.prototype.
     let injectedScriptSource = utils.read('src/inspector/injected-script-source.js');
@@ -141,8 +141,13 @@ InspectorTest.ContextGroup = class {
     }
     scriptSource += `(function installSettersAndGetters() {
         let defineProperty = Object.defineProperty;
-        let ObjectPrototype = Object.prototype;\n`;
-    scriptSource += Array.from(getters).map(getter => `
+        let ObjectPrototype = Object.prototype;
+        let ArrayPrototype = Array.prototype;
+        defineProperty(ArrayPrototype, 0, {
+          set() { debugger; throw 42; }, get() { debugger; throw 42; },
+          __proto__: null
+        });`,
+        scriptSource += Array.from(getters).map(getter => `
         defineProperty(ObjectPrototype, '${getter}', {
           set() { debugger; throw 42; }, get() { debugger; throw 42; },
           __proto__: null
@@ -150,13 +155,12 @@ InspectorTest.ContextGroup = class {
         `).join('\n') + '})();';
     this.addScript(scriptSource);
 
-    if (debug) {
+    if (session) {
       InspectorTest.log('WARNING: setupInjectedScriptEnvironment with debug flag for debugging only and should not be landed.');
       InspectorTest.log('WARNING: run test with --expose-inspector-scripts flag to get more details.');
       InspectorTest.log('WARNING: you can additionally comment rjsmin in xxd.py to get unminified injected-script-source.js.');
-      var session = InspectorTest._sessions.next().vale;
       session.setupScriptMap();
-      sesison.Protocol.Debugger.enable();
+      session.Protocol.Debugger.enable();
       session.Protocol.Debugger.onPaused(message => {
         let callFrames = message.params.callFrames;
         session.logSourceLocations(callFrames.map(frame => frame.location));
@@ -213,14 +217,14 @@ InspectorTest.Session = class {
     }
   }
 
-  logSourceLocation(location) {
+  logSourceLocation(location, forceSourceRequest) {
     var scriptId = location.scriptId;
     if (!this._scriptMap || !this._scriptMap.has(scriptId)) {
       InspectorTest.log("setupScriptMap should be called before Protocol.Debugger.enable.");
       InspectorTest.completeTest();
     }
     var script = this._scriptMap.get(scriptId);
-    if (!script.scriptSource) {
+    if (!script.scriptSource || forceSourceRequest) {
       return this.Protocol.Debugger.getScriptSource({ scriptId })
           .then(message => script.scriptSource = message.result.scriptSource)
           .then(dumpSourceWithLocation);
@@ -270,6 +274,25 @@ InspectorTest.Session = class {
       if (type === 'call') return '|C|';
       if (type === 'debuggerStatement') return '|D|';
       return '|_|';
+    }
+  }
+
+  async logTypeProfile(typeProfile, source) {
+    let entries = typeProfile.entries;
+
+    // Sort in reverse order so we can replace entries without invalidating
+    // the other offsets.
+    entries = entries.sort((a, b) => b.offset - a.offset);
+
+    for (let entry of entries) {
+      source = source.slice(0, entry.offset) + typeAnnotation(entry.types) +
+        source.slice(entry.offset);
+    }
+    InspectorTest.log(source);
+    return typeProfile;
+
+    function typeAnnotation(types) {
+      return `/*${types.map(t => t.name).join(', ')}*/`;
     }
   }
 

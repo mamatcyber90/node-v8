@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_BASE_TEMPLATE_UTILS_H
+#define V8_BASE_TEMPLATE_UTILS_H
+
 #include <array>
 #include <memory>
 
@@ -52,5 +55,45 @@ std::unique_ptr<T> make_unique(Args&&... args) {
   return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
 }
 
+// implicit_cast<A>(x) triggers an implicit cast from {x} to type {A}. This is
+// useful in situations where static_cast<A>(x) would do too much.
+template <class A>
+A implicit_cast(A x) {
+  return x;
+}
+
+// Helper to determine how to pass values: Pass scalars and arrays by value,
+// others by const reference (even if it was a non-const ref before; this is
+// disallowed by the style guide anyway).
+// The default is to also remove array extends (int[5] -> int*), but this can be
+// disabled by setting {remove_array_extend} to false.
+template <typename T, bool remove_array_extend = true>
+struct pass_value_or_ref {
+  using noref_t = typename std::remove_reference<T>::type;
+  using decay_t = typename std::conditional<
+      std::is_array<noref_t>::value && !remove_array_extend, noref_t,
+      typename std::decay<noref_t>::type>::type;
+  using type = typename std::conditional<std::is_scalar<decay_t>::value ||
+                                             std::is_array<decay_t>::value,
+                                         decay_t, const decay_t&>::type;
+};
+
+template <typename T>
+struct has_output_operator {
+  // This template is only instantiable if U provides operator<< with ostream.
+  // Its return type is uint8_t.
+  template <typename U>
+  static auto __check_operator(U u)
+      -> decltype(*(std::ostream*)nullptr << *u, uint8_t{0});
+  // This is a fallback implementation, returning uint16_t. If the template
+  // above is instantiable, is has precedence over this varargs function.
+  static uint16_t __check_operator(...);
+
+  using ptr_t = typename std::add_pointer<T>::type;
+  static constexpr bool value = sizeof(__check_operator(ptr_t{nullptr})) == 1;
+};
+
 }  // namespace base
 }  // namespace v8
+
+#endif  // V8_BASE_TEMPLATE_UTILS_H

@@ -7,14 +7,18 @@
 #include <fstream>
 #include <memory>
 
+#include "src/ast/prettyprinter.h"
+#include "src/bootstrapper.h"
 #include "src/codegen.h"
 #include "src/compilation-info.h"
 #include "src/compiler.h"
-#include "src/counters.h"
+#include "src/counters-inl.h"
 #include "src/interpreter/bytecode-generator.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/log.h"
-#include "src/objects.h"
+#include "src/objects-inl.h"
+#include "src/objects/shared-function-info.h"
+#include "src/parsing/parse-info.h"
 #include "src/setup-isolate.h"
 #include "src/visitors.h"
 
@@ -24,7 +28,8 @@ namespace interpreter {
 
 class InterpreterCompilationJob final : public CompilationJob {
  public:
-  explicit InterpreterCompilationJob(CompilationInfo* info);
+  InterpreterCompilationJob(ParseInfo* parse_info, FunctionLiteral* literal,
+                            Isolate* isolate);
 
  protected:
   Status PrepareJobImpl() final;
@@ -34,36 +39,30 @@ class InterpreterCompilationJob final : public CompilationJob {
  private:
   class TimerScope final {
    public:
-    TimerScope(RuntimeCallStats* stats, RuntimeCallStats::CounterId counter_id)
-        : stats_(stats) {
-      if (V8_UNLIKELY(FLAG_runtime_stats)) {
-        RuntimeCallStats::Enter(stats_, &timer_, counter_id);
-      }
-    }
-
-    explicit TimerScope(RuntimeCallCounter* counter) : stats_(nullptr) {
-      if (V8_UNLIKELY(FLAG_runtime_stats)) {
+    explicit TimerScope(RuntimeCallCounter* counter)
+        : runtime_stats_enabled_(FLAG_runtime_stats) {
+      if (V8_UNLIKELY(runtime_stats_enabled_ && counter != nullptr)) {
         timer_.Start(counter, nullptr);
       }
     }
 
     ~TimerScope() {
-      if (V8_UNLIKELY(FLAG_runtime_stats)) {
-        if (stats_) {
-          RuntimeCallStats::Leave(stats_, &timer_);
-        } else {
-          timer_.Stop();
-        }
+      if (V8_UNLIKELY(runtime_stats_enabled_)) {
+        timer_.Stop();
       }
     }
 
    private:
-    RuntimeCallStats* stats_;
     RuntimeCallTimer timer_;
+    bool runtime_stats_enabled_;
+
+    DISALLOW_COPY_AND_ASSIGN(TimerScope);
   };
 
   BytecodeGenerator* generator() { return &generator_; }
 
+  Zone zone_;
+  CompilationInfo compilation_info_;
   BytecodeGenerator generator_;
   RuntimeCallStats* runtime_call_stats_;
   RuntimeCallCounter background_execute_counter_;
@@ -122,12 +121,33 @@ void Interpreter::IterateDispatchTable(RootVisitor* v) {
   }
 }
 
-// static
-int Interpreter::InterruptBudget() {
-  return FLAG_interrupt_budget * kCodeSizeMultiplier;
-}
-
 namespace {
+
+void MaybePrintAst(ParseInfo* parse_info, CompilationInfo* compilation_info) {
+  Isolate* isolate = compilation_info->isolate();
+  bool print_ast = isolate->bootstrapper()->IsActive() ? FLAG_print_builtin_ast
+                                                       : FLAG_print_ast;
+  if (!print_ast) return;
+
+  // Requires internalizing the AST, so make sure we are on the main thread and
+  // allow handle dereference and allocations.
+  // TODO(rmcilroy): Make ast-printer print ast raw strings instead of
+  // internalized strings to avoid internalizing here.
+  DCHECK(ThreadId::Current().Equals(isolate->thread_id()));
+  AllowHandleDereference allow_deref;
+  AllowHandleAllocation allow_handles;
+  AllowHeapAllocation allow_gc;
+  parse_info->ast_value_factory()->Internalize(isolate);
+
+  OFStream os(stdout);
+  std::unique_ptr<char[]> name = compilation_info->GetDebugName();
+  os << "[generating bytecode for function: "
+     << compilation_info->GetDebugName().get() << "]" << std::endl;
+#ifdef DEBUG
+  os << "--- AST ---" << std::endl
+     << AstPrinter(isolate).PrintProgram(parse_info->literal()) << std::endl;
+#endif  // DEBUG
+}
 
 bool ShouldPrintBytecode(Handle<SharedFunctionInfo> shared) {
   if (!FLAG_print_bytecode) return false;
@@ -143,22 +163,28 @@ bool ShouldPrintBytecode(Handle<SharedFunctionInfo> shared) {
 
 }  // namespace
 
-InterpreterCompilationJob::InterpreterCompilationJob(CompilationInfo* info)
-    : CompilationJob(info->isolate(), info, "Ignition"),
-      generator_(info),
-      runtime_call_stats_(info->isolate()->counters()->runtime_call_stats()),
+InterpreterCompilationJob::InterpreterCompilationJob(ParseInfo* parse_info,
+                                                     FunctionLiteral* literal,
+                                                     Isolate* isolate)
+    : CompilationJob(isolate, parse_info, &compilation_info_, "Ignition"),
+      zone_(isolate->allocator(), ZONE_NAME),
+      compilation_info_(&zone_, isolate, parse_info, literal),
+      generator_(&compilation_info_),
+      runtime_call_stats_(isolate->counters()->runtime_call_stats()),
       background_execute_counter_("CompileBackgroundIgnition") {}
 
 InterpreterCompilationJob::Status InterpreterCompilationJob::PrepareJobImpl() {
-  CodeGenerator::MakeCodePrologue(info(), "interpreter");
+  MaybePrintAst(parse_info(), compilation_info());
   return SUCCEEDED;
 }
 
 InterpreterCompilationJob::Status InterpreterCompilationJob::ExecuteJobImpl() {
-  TimerScope runtimeTimer =
-      executed_on_background_thread()
-          ? TimerScope(&background_execute_counter_)
-          : TimerScope(runtime_call_stats_, &RuntimeCallStats::CompileIgnition);
+  TimerScope runtimeTimer(
+      executed_on_background_thread() ? &background_execute_counter_ : nullptr);
+  RuntimeCallTimerScope runtimeTimerScope(
+      !executed_on_background_thread() ? runtime_call_stats_ : nullptr,
+      &RuntimeCallStats::CompileIgnition);
+
   // TODO(lpy): add support for background compilation RCS trace.
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"), "V8.CompileIgnition");
 
@@ -177,30 +203,34 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::FinalizeJobImpl() {
         &background_execute_counter_);
   }
 
-  RuntimeCallTimerScope runtimeTimer(
-      runtime_call_stats_, &RuntimeCallStats::CompileIgnitionFinalization);
+  RuntimeCallTimerScope runtimeTimerScope(
+      !executed_on_background_thread() ? runtime_call_stats_ : nullptr,
+      &RuntimeCallStats::CompileIgnitionFinalization);
 
   Handle<BytecodeArray> bytecodes = generator()->FinalizeBytecode(isolate());
   if (generator()->HasStackOverflow()) {
     return FAILED;
   }
 
-  if (ShouldPrintBytecode(info()->shared_info())) {
+  if (ShouldPrintBytecode(compilation_info()->shared_info())) {
     OFStream os(stdout);
-    std::unique_ptr<char[]> name = info()->GetDebugName();
-    os << "[generating bytecode for function: " << info()->GetDebugName().get()
-       << "]" << std::endl;
+    std::unique_ptr<char[]> name = compilation_info()->GetDebugName();
+    os << "[generated bytecode for function: "
+       << compilation_info()->GetDebugName().get() << "]" << std::endl;
     bytecodes->Disassemble(os);
     os << std::flush;
   }
 
-  info()->SetBytecodeArray(bytecodes);
-  info()->SetCode(info()->isolate()->builtins()->InterpreterEntryTrampoline());
+  compilation_info()->SetBytecodeArray(bytecodes);
+  compilation_info()->SetCode(
+      BUILTIN_CODE(compilation_info()->isolate(), InterpreterEntryTrampoline));
   return SUCCEEDED;
 }
 
-CompilationJob* Interpreter::NewCompilationJob(CompilationInfo* info) {
-  return new InterpreterCompilationJob(info);
+CompilationJob* Interpreter::NewCompilationJob(ParseInfo* parse_info,
+                                               FunctionLiteral* literal,
+                                               Isolate* isolate) {
+  return new InterpreterCompilationJob(parse_info, literal, isolate);
 }
 
 bool Interpreter::IsDispatchTableInitialized() {

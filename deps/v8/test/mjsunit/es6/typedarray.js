@@ -534,6 +534,7 @@ function TestTypedArraySet() {
   var a51 = new Int8Array(b, 0, 2)
   var a52 = new Int8Array(b, 1, 2)
   var a53 = new Int8Array(b, 2, 2)
+  var a54 = new Int8Array(b, 0, 0)
 
   a5.set([0x5050, 0x0a0a])
   assertArrayPrefix([0x50, 0x50, 0x0a, 0x0a], a50)
@@ -564,6 +565,10 @@ function TestTypedArraySet() {
   a50.set([0x50, 0x51, 0x0a, 0x0b])
   a5.set(a53)
   assertArrayPrefix([0x000a, 0x000b], a5)
+
+  a50.set([0x50, 0x51, 0x0a, 0x0b])
+  a5.set(a54, 0)
+  assertArrayPrefix([0x50, 0x51, 0x0a, 0x0b], a50)
 
   // Mixed types of same size.
   var a61 = new Float32Array([1.2, 12.3])
@@ -880,3 +885,12 @@ for(i = 0; i < typedArrayConstructors.length; i++) {
                  e.message);
   }
 })();
+
+// Regression test 761654
+assertThrows(function LargeSourceArray() {
+  let v0 = {};
+  v0.length =  2 ** 32; // too large for uint32
+  let a = new Int8Array();
+
+  a.set(v0);
+});

@@ -87,95 +87,61 @@ namespace internal {
   V(xmm6)                               \
   V(xmm7)
 
-// CPU Registers.
-//
-// 1) We would prefer to use an enum, but enum values are assignment-
-// compatible with int, which has caused code-generation bugs.
-//
-// 2) We would prefer to use a class instead of a struct but we don't like
-// the register initialization to depend on the particular initialization
-// order (which appears to be different on OS X, Linux, and Windows for the
-// installed versions of C++ we tried). Using a struct permits C-style
-// "initialization". Also, the Register objects cannot be const as this
-// forces initialization stubs in MSVC, making us dependent on initialization
-// order.
-//
-// 3) By not using an enum, we are possibly preventing the compiler from
-// doing certain constant folds, which may significantly reduce the
-// code generated for some assembly instructions (because they boil down
-// to a few constants). If this is a problem, we could change the code
-// such that we use an enum in optimized mode, and the struct in debug
-// mode. This way we get the compile-time error checking in debug mode
-// and best performance in optimized code.
-//
-struct Register {
-  enum Code {
-#define REGISTER_CODE(R) kCode_##R,
-    GENERAL_REGISTERS(REGISTER_CODE)
+// Note that the bit values must match those used in actual instruction encoding
+const int kNumRegs = 8;
+
+// Caller-saved registers
+const RegList kJSCallerSaved =
+    1 << 0 |  // eax
+    1 << 1 |  // ecx
+    1 << 2 |  // edx
+    1 << 3 |  // ebx - used as a caller-saved register in JavaScript code
+    1 << 7;   // edi - callee function
+
+const int kNumJSCallerSaved = 5;
+
+// Number of registers for which space is reserved in safepoints.
+const int kNumSafepointRegisters = 8;
+
+enum RegisterCode {
+#define REGISTER_CODE(R) kRegCode_##R,
+  GENERAL_REGISTERS(REGISTER_CODE)
 #undef REGISTER_CODE
-        kAfterLast,
-    kCode_no_reg = -1
-  };
-
-  static constexpr int kNumRegisters = Code::kAfterLast;
-
-  static Register from_code(int code) {
-    DCHECK(code >= 0);
-    DCHECK(code < kNumRegisters);
-    Register r = {code};
-    return r;
-  }
-  bool is_valid() const { return 0 <= reg_code && reg_code < kNumRegisters; }
-  bool is(Register reg) const { return reg_code == reg.reg_code; }
-  int code() const {
-    DCHECK(is_valid());
-    return reg_code;
-  }
-  int bit() const {
-    DCHECK(is_valid());
-    return 1 << reg_code;
-  }
-
-  bool is_byte_register() const { return reg_code <= 3; }
-
-  // Unfortunately we can't make this private in a struct.
-  int reg_code;
+      kRegAfterLast
 };
 
-#define DEFINE_REGISTER(R) constexpr Register R = {Register::kCode_##R};
+class Register : public RegisterBase<Register, kRegAfterLast> {
+ public:
+  bool is_byte_register() const { return reg_code_ <= 3; }
+
+ private:
+  friend class RegisterBase<Register, kRegAfterLast>;
+  explicit constexpr Register(int code) : RegisterBase(code) {}
+};
+
+static_assert(IS_TRIVIALLY_COPYABLE(Register) &&
+                  sizeof(Register) == sizeof(int),
+              "Register can efficiently be passed by value");
+
+#define DEFINE_REGISTER(R) \
+  constexpr Register R = Register::from_code<kRegCode_##R>();
 GENERAL_REGISTERS(DEFINE_REGISTER)
 #undef DEFINE_REGISTER
-constexpr Register no_reg = {Register::kCode_no_reg};
+constexpr Register no_reg = Register::no_reg();
 
 constexpr bool kSimpleFPAliasing = true;
 constexpr bool kSimdMaskRegisters = false;
 
-struct XMMRegister {
-  enum Code {
-#define REGISTER_CODE(R) kCode_##R,
-    DOUBLE_REGISTERS(REGISTER_CODE)
+enum DoubleCode {
+#define REGISTER_CODE(R) kDoubleCode_##R,
+  DOUBLE_REGISTERS(REGISTER_CODE)
 #undef REGISTER_CODE
-        kAfterLast,
-    kCode_no_reg = -1
-  };
+      kDoubleAfterLast
+};
 
-  static constexpr int kMaxNumRegisters = Code::kAfterLast;
-
-  static XMMRegister from_code(int code) {
-    XMMRegister result = {code};
-    return result;
-  }
-
-  bool is_valid() const { return 0 <= reg_code && reg_code < kMaxNumRegisters; }
-
-  int code() const {
-    DCHECK(is_valid());
-    return reg_code;
-  }
-
-  bool is(XMMRegister reg) const { return reg_code == reg.reg_code; }
-
-  int reg_code;
+class XMMRegister : public RegisterBase<XMMRegister, kDoubleAfterLast> {
+  friend class RegisterBase<XMMRegister, kDoubleAfterLast>;
+  explicit constexpr XMMRegister(int code) : RegisterBase(code) {}
 };
 
 typedef XMMRegister FloatRegister;
@@ -185,10 +151,10 @@ typedef XMMRegister DoubleRegister;
 typedef XMMRegister Simd128Register;
 
 #define DEFINE_REGISTER(R) \
-  constexpr DoubleRegister R = {DoubleRegister::kCode_##R};
+  constexpr DoubleRegister R = DoubleRegister::from_code<kDoubleCode_##R>();
 DOUBLE_REGISTERS(DEFINE_REGISTER)
 #undef DEFINE_REGISTER
-constexpr DoubleRegister no_double_reg = {DoubleRegister::kCode_no_reg};
+constexpr DoubleRegister no_double_reg = DoubleRegister::no_reg();
 
 enum Condition {
   // any value < 0 is considered no_condition
@@ -267,12 +233,30 @@ enum RoundingMode {
 
 class Immediate BASE_EMBEDDED {
  public:
-  inline explicit Immediate(int x);
-  inline explicit Immediate(const ExternalReference& ext);
-  inline explicit Immediate(Handle<HeapObject> handle);
-  inline explicit Immediate(Smi* value);
-  inline explicit Immediate(Address addr);
-  inline explicit Immediate(Address x, RelocInfo::Mode rmode);
+  inline explicit Immediate(int x) {
+    value_.immediate = x;
+    rmode_ = RelocInfo::NONE32;
+  }
+  inline explicit Immediate(const ExternalReference& ext) {
+    value_.immediate = reinterpret_cast<int32_t>(ext.address());
+    rmode_ = RelocInfo::EXTERNAL_REFERENCE;
+  }
+  inline explicit Immediate(Handle<HeapObject> handle) {
+    value_.immediate = reinterpret_cast<intptr_t>(handle.address());
+    rmode_ = RelocInfo::EMBEDDED_OBJECT;
+  }
+  inline explicit Immediate(Smi* value) {
+    value_.immediate = reinterpret_cast<intptr_t>(value);
+    rmode_ = RelocInfo::NONE32;
+  }
+  inline explicit Immediate(Address addr) {
+    value_.immediate = reinterpret_cast<int32_t>(addr);
+    rmode_ = RelocInfo::NONE32;
+  }
+  inline explicit Immediate(Address x, RelocInfo::Mode rmode) {
+    value_.immediate = reinterpret_cast<int32_t>(x);
+    rmode_ = rmode;
+  }
 
   static Immediate EmbeddedNumber(double number);  // Smi or HeapNumber.
   static Immediate EmbeddedCode(CodeStub* code);
@@ -316,7 +300,10 @@ class Immediate BASE_EMBEDDED {
   RelocInfo::Mode rmode() const { return rmode_; }
 
  private:
-  inline explicit Immediate(Label* value);
+  inline explicit Immediate(Label* value) {
+    value_.immediate = reinterpret_cast<int32_t>(value);
+    rmode_ = RelocInfo::INTERNAL_REFERENCE;
+  }
 
   union Value {
     Value() {}
@@ -350,13 +337,19 @@ enum ScaleFactor {
 class Operand BASE_EMBEDDED {
  public:
   // reg
-  INLINE(explicit Operand(Register reg));
+  INLINE(explicit Operand(Register reg)) { set_modrm(3, reg); }
 
   // XMM reg
-  INLINE(explicit Operand(XMMRegister xmm_reg));
+  INLINE(explicit Operand(XMMRegister xmm_reg)) {
+    Register reg = Register::from_code(xmm_reg.code());
+    set_modrm(3, reg);
+  }
 
   // [disp/r]
-  INLINE(explicit Operand(int32_t disp, RelocInfo::Mode rmode));
+  INLINE(explicit Operand(int32_t disp, RelocInfo::Mode rmode)) {
+    set_modrm(0, ebp);
+    set_dispr(disp, rmode);
+  }
 
   // [disp/r]
   INLINE(explicit Operand(Immediate imm));
@@ -395,10 +388,6 @@ class Operand BASE_EMBEDDED {
                    RelocInfo::EXTERNAL_REFERENCE);
   }
 
-  static Operand ForCell(Handle<Cell> cell) {
-    return Operand(reinterpret_cast<int32_t>(cell.address()), RelocInfo::CELL);
-  }
-
   static Operand ForRegisterPlusImmediate(Register base, Immediate imm) {
     return Operand(base, imm.value_.immediate, imm.rmode_);
   }
@@ -416,11 +405,21 @@ class Operand BASE_EMBEDDED {
  private:
   // Set the ModRM byte without an encoded 'reg' register. The
   // register is encoded later as part of the emit_operand operation.
-  inline void set_modrm(int mod, Register rm);
+  inline void set_modrm(int mod, Register rm) {
+    DCHECK((mod & -4) == 0);
+    buf_[0] = mod << 6 | rm.code();
+    len_ = 1;
+  }
 
   inline void set_sib(ScaleFactor scale, Register index, Register base);
   inline void set_disp8(int8_t disp);
-  inline void set_dispr(int32_t disp, RelocInfo::Mode rmode);
+  inline void set_dispr(int32_t disp, RelocInfo::Mode rmode) {
+    DCHECK(len_ == 1 || len_ == 2);
+    int32_t* p = reinterpret_cast<int32_t*>(&buf_[len_]);
+    *p = disp;
+    len_ += sizeof(int32_t);
+    rmode_ = rmode;
+  }
 
   byte buf_[6];
   // The number of bytes in buf_.
@@ -538,9 +537,7 @@ class Assembler : public AssemblerBase {
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
       Isolate* isolate, Address instruction_payload, Code* code,
-      Address target) {
-    set_target_address_at(isolate, instruction_payload, code, target);
-  }
+      Address target);
 
   // This sets the internal reference at the pc.
   inline static void deserialization_set_target_internal_reference_at(
@@ -554,13 +551,6 @@ class Assembler : public AssemblerBase {
   static constexpr int kCallTargetAddressOffset = kPointerSize;
 
   static constexpr int kCallInstructionLength = 5;
-
-  // The debug break slot must be able to contain a call instruction.
-  static constexpr int kDebugBreakSlotLength = kCallInstructionLength;
-
-  // Distance between start of patched debug break slot and the emitted address
-  // to jump to.
-  static constexpr int kPatchDebugBreakSlotAddressOffset = 1;  // JMP imm32.
 
   // One byte opcode for test al, 0xXX.
   static constexpr byte kTestAlByte = 0xA8;
@@ -1129,9 +1119,6 @@ class Assembler : public AssemblerBase {
   void psrlq(XMMRegister reg, int8_t shift);
   void psrlq(XMMRegister dst, XMMRegister src);
 
-  // pshufb is SSSE3 instruction
-  void pshufb(XMMRegister dst, XMMRegister src) { pshufb(dst, Operand(src)); }
-  void pshufb(XMMRegister dst, const Operand& src);
   void pshuflw(XMMRegister dst, XMMRegister src, uint8_t shuffle) {
     pshuflw(dst, Operand(src), shuffle);
   }
@@ -1411,12 +1398,6 @@ class Assembler : public AssemblerBase {
   void vpsraw(XMMRegister dst, XMMRegister src, int8_t imm8);
   void vpsrad(XMMRegister dst, XMMRegister src, int8_t imm8);
 
-  void vpshufb(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
-    vpshufb(dst, src1, Operand(src2));
-  }
-  void vpshufb(XMMRegister dst, XMMRegister src1, const Operand& src2) {
-    vinstr(0x00, dst, src1, src2, k66, k0F38, kW0);
-  }
   void vpshuflw(XMMRegister dst, XMMRegister src, uint8_t shuffle) {
     vpshuflw(dst, Operand(src), shuffle);
   }
@@ -1494,20 +1475,11 @@ class Assembler : public AssemblerBase {
     bmi1(0xf7, dst, src2, src1);
   }
   void blsi(Register dst, Register src) { blsi(dst, Operand(src)); }
-  void blsi(Register dst, const Operand& src) {
-    Register ireg = {3};
-    bmi1(0xf3, ireg, dst, src);
-  }
+  void blsi(Register dst, const Operand& src) { bmi1(0xf3, ebx, dst, src); }
   void blsmsk(Register dst, Register src) { blsmsk(dst, Operand(src)); }
-  void blsmsk(Register dst, const Operand& src) {
-    Register ireg = {2};
-    bmi1(0xf3, ireg, dst, src);
-  }
+  void blsmsk(Register dst, const Operand& src) { bmi1(0xf3, edx, dst, src); }
   void blsr(Register dst, Register src) { blsr(dst, Operand(src)); }
-  void blsr(Register dst, const Operand& src) {
-    Register ireg = {1};
-    bmi1(0xf3, ireg, dst, src);
-  }
+  void blsr(Register dst, const Operand& src) { bmi1(0xf3, ecx, dst, src); }
   void tzcnt(Register dst, Register src) { tzcnt(dst, Operand(src)); }
   void tzcnt(Register dst, const Operand& src);
 
@@ -1635,6 +1607,18 @@ class Assembler : public AssemblerBase {
   SSE2_INSTRUCTION_LIST(DECLARE_SSE2_AVX_INSTRUCTION)
 #undef DECLARE_SSE2_AVX_INSTRUCTION
 
+#define DECLARE_SSSE3_INSTRUCTION(instruction, prefix, escape1, escape2,     \
+                                  opcode)                                    \
+  void instruction(XMMRegister dst, XMMRegister src) {                       \
+    instruction(dst, Operand(src));                                          \
+  }                                                                          \
+  void instruction(XMMRegister dst, const Operand& src) {                    \
+    ssse3_instr(dst, src, 0x##prefix, 0x##escape1, 0x##escape2, 0x##opcode); \
+  }
+
+  SSSE3_INSTRUCTION_LIST(DECLARE_SSSE3_INSTRUCTION)
+#undef DECLARE_SSSE3_INSTRUCTION
+
 #define DECLARE_SSE4_INSTRUCTION(instruction, prefix, escape1, escape2,     \
                                  opcode)                                    \
   void instruction(XMMRegister dst, XMMRegister src) {                      \
@@ -1647,8 +1631,8 @@ class Assembler : public AssemblerBase {
   SSE4_INSTRUCTION_LIST(DECLARE_SSE4_INSTRUCTION)
 #undef DECLARE_SSE4_INSTRUCTION
 
-#define DECLARE_SSE4_AVX_INSTRUCTION(instruction, prefix, escape1, escape2,   \
-                                     opcode)                                  \
+#define DECLARE_SSE34_AVX_INSTRUCTION(instruction, prefix, escape1, escape2,  \
+                                      opcode)                                 \
   void v##instruction(XMMRegister dst, XMMRegister src1, XMMRegister src2) {  \
     v##instruction(dst, src1, Operand(src2));                                 \
   }                                                                           \
@@ -1657,8 +1641,9 @@ class Assembler : public AssemblerBase {
     vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape1##escape2, kW0); \
   }
 
-  SSE4_INSTRUCTION_LIST(DECLARE_SSE4_AVX_INSTRUCTION)
-#undef DECLARE_SSE4_AVX_INSTRUCTION
+  SSSE3_INSTRUCTION_LIST(DECLARE_SSE34_AVX_INSTRUCTION)
+  SSE4_INSTRUCTION_LIST(DECLARE_SSE34_AVX_INSTRUCTION)
+#undef DECLARE_SSE34_AVX_INSTRUCTION
 
   // Prefetch src position into cache level.
   // Level 1, 2 or 3 specifies CPU cache level. Level 0 specifies a
@@ -1671,10 +1656,6 @@ class Assembler : public AssemblerBase {
     return pc_offset() - label->pos();
   }
 
-  // Mark address of a debug break slot.
-  void RecordDebugBreakSlot(RelocInfo::Mode mode);
-
-  // Record a comment relocation entry that can be used by a disassembler.
   // Use --code-comments to enable.
   void RecordComment(const char* msg);
 
@@ -1788,17 +1769,24 @@ class Assembler : public AssemblerBase {
 
   void sse2_instr(XMMRegister dst, const Operand& src, byte prefix, byte escape,
                   byte opcode);
+  void ssse3_instr(XMMRegister dst, const Operand& src, byte prefix,
+                   byte escape1, byte escape2, byte opcode);
   void sse4_instr(XMMRegister dst, const Operand& src, byte prefix,
                   byte escape1, byte escape2, byte opcode);
   void vinstr(byte op, XMMRegister dst, XMMRegister src1, const Operand& src2,
               SIMDPrefix pp, LeadingOpcode m, VexW w);
-  // Most BMI instructions are similiar.
+  // Most BMI instructions are similar.
   void bmi1(byte op, Register reg, Register vreg, const Operand& rm);
   void bmi2(SIMDPrefix pp, byte op, Register reg, Register vreg,
             const Operand& rm);
 
   // record reloc info for current pc_
   void RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data = 0);
+
+  // record the position of jmp/jcc instruction
+  void record_farjmp_position(Label* L, int pos);
+
+  bool is_optimizable_farjmp(int idx);
 
   friend class CodePatcher;
   friend class EnsureSpace;
@@ -1823,6 +1811,11 @@ class Assembler : public AssemblerBase {
   void AllocateAndInstallRequestedHeapObjects(Isolate* isolate);
 
   std::forward_list<HeapObjectRequest> heap_object_requests_;
+
+  // Variables for this instance of assembler
+  int farjmp_num_ = 0;
+  std::deque<int> farjmp_positions_;
+  std::map<Label*, std::vector<int>> label_farjmp_maps_;
 };
 
 

@@ -12,13 +12,24 @@
 
 namespace v8 {
 namespace internal {
+
+namespace compiler {
+struct ModuleEnv;
+}
+
 namespace wasm {
 
-const uint32_t kWasmMagic = 0x6d736100;
-const uint32_t kWasmVersion = 0x01;
 const uint8_t kWasmFunctionTypeForm = 0x60;
 const uint8_t kWasmAnyFunctionTypeForm = 0x70;
 const uint8_t kResizableMaximumFlag = 1;
+const uint8_t kNoMaximumFlag = 0;
+
+enum MemoryFlags : uint8_t {
+  kNoMaximum = 0,
+  kMaximum = 1,
+  kSharedNoMaximum = 2,
+  kSharedAndMaximum = 3
+};
 
 enum SectionCode : int8_t {
   kUnknownSectionCode = 0,     // code for unknown sections
@@ -34,16 +45,17 @@ enum SectionCode : int8_t {
   kCodeSectionCode = 10,       // Function code
   kDataSectionCode = 11,       // Data segments
   kNameSectionCode = 12,       // Name section (encoded as a string)
-  kExceptionSectionCode = 13,  // Exception section (encoded as a string)
+  kExceptionSectionCode = 13,  // Exception section
 
   // Helper values
   kFirstSectionInModule = kTypeSectionCode,
+  kLastKnownModuleSection = kExceptionSectionCode,
 };
 
 enum NameSectionType : uint8_t { kModule = 0, kFunction = 1, kLocal = 2 };
 
 inline bool IsValidSectionCode(uint8_t byte) {
-  return kTypeSectionCode <= byte && byte <= kDataSectionCode;
+  return kTypeSectionCode <= byte && byte <= kLastKnownModuleSection;
 }
 
 const char* SectionName(SectionCode code);
@@ -99,12 +111,13 @@ V8_EXPORT_PRIVATE FunctionSig* DecodeWasmSignatureForTesting(Zone* zone,
 
 // Decodes the bytes of a wasm function between
 // {function_start} and {function_end}.
-V8_EXPORT_PRIVATE FunctionResult
-SyncDecodeWasmFunction(Isolate* isolate, Zone* zone, ModuleBytesEnv* env,
-                       const byte* function_start, const byte* function_end);
+V8_EXPORT_PRIVATE FunctionResult SyncDecodeWasmFunction(
+    Isolate* isolate, Zone* zone, const ModuleWireBytes& wire_bytes,
+    const WasmModule* module, const byte* function_start,
+    const byte* function_end);
 
 V8_EXPORT_PRIVATE FunctionResult
-AsyncDecodeWasmFunction(Isolate* isolate, Zone* zone, ModuleBytesEnv* env,
+AsyncDecodeWasmFunction(Isolate* isolate, Zone* zone, compiler::ModuleEnv* env,
                         const byte* function_start, const byte* function_end,
                         const std::shared_ptr<Counters> async_counters);
 
@@ -134,6 +147,36 @@ AsmJsOffsetsResult DecodeAsmJsOffsets(const byte* module_start,
 // section, returns all information decoded up to the first error.
 void DecodeLocalNames(const byte* module_start, const byte* module_end,
                       LocalNames* result);
+
+class ModuleDecoderImpl;
+
+class ModuleDecoder {
+ public:
+  ModuleDecoder();
+  ~ModuleDecoder();
+
+  void StartDecoding(Isolate* isolate,
+                     ModuleOrigin origin = ModuleOrigin::kWasmOrigin);
+
+  void DecodeModuleHeader(Vector<const uint8_t> bytes, uint32_t offset);
+
+  void DecodeSection(SectionCode section_code, Vector<const uint8_t> bytes,
+                     uint32_t offset, bool verify_functions = true);
+
+  bool CheckFunctionsCount(uint32_t functions_count, uint32_t offset);
+
+  void DecodeFunctionBody(uint32_t index, uint32_t size, uint32_t offset,
+                          bool verify_functions = true);
+
+  ModuleResult FinishDecoding(bool verify_functions = true);
+
+  WasmModule* module() const;
+
+  bool ok();
+
+ private:
+  std::unique_ptr<ModuleDecoderImpl> impl_;
+};
 
 }  // namespace wasm
 }  // namespace internal

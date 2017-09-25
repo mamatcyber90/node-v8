@@ -28,7 +28,6 @@ Reduction RedundancyElimination::Reduce(Node* node) {
     case IrOpcode::kCheckSmi:
     case IrOpcode::kCheckString:
     case IrOpcode::kCheckSeqString:
-    case IrOpcode::kCheckNonEmptyString:
     case IrOpcode::kCheckNotTaggedHole:
     case IrOpcode::kCheckedFloat64ToInt32:
     case IrOpcode::kCheckedInt32Add:
@@ -43,6 +42,8 @@ Reduction RedundancyElimination::Reduce(Node* node) {
       return ReduceCheckNode(node);
     case IrOpcode::kSpeculativeNumberAdd:
     case IrOpcode::kSpeculativeNumberSubtract:
+    case IrOpcode::kSpeculativeSafeIntegerAdd:
+    case IrOpcode::kSpeculativeSafeIntegerSubtract:
       // For increments and decrements by a constant, try to learn from the last
       // bounds check.
       return TryReuseBoundsCheckForFirstInput(node);
@@ -125,11 +126,9 @@ namespace {
 
 bool IsCompatibleCheck(Node const* a, Node const* b) {
   if (a->op() != b->op()) {
-    if (b->opcode() == IrOpcode::kCheckString &&
-        (a->opcode() == IrOpcode::kCheckInternalizedString ||
-         a->opcode() == IrOpcode::kCheckSeqString ||
-         a->opcode() == IrOpcode::kCheckNonEmptyString)) {
-      // Check[Internalized,Seq,NonEmpty]String(node) implies CheckString(node)
+    if (a->opcode() == IrOpcode::kCheckInternalizedString &&
+        b->opcode() == IrOpcode::kCheckString) {
+      // CheckInternalizedString(node) implies CheckString(node)
     } else {
       return false;
     }
@@ -195,7 +194,9 @@ Reduction RedundancyElimination::ReduceCheckNode(Node* node) {
 
 Reduction RedundancyElimination::TryReuseBoundsCheckForFirstInput(Node* node) {
   DCHECK(node->opcode() == IrOpcode::kSpeculativeNumberAdd ||
-         node->opcode() == IrOpcode::kSpeculativeNumberSubtract);
+         node->opcode() == IrOpcode::kSpeculativeNumberSubtract ||
+         node->opcode() == IrOpcode::kSpeculativeSafeIntegerAdd ||
+         node->opcode() == IrOpcode::kSpeculativeSafeIntegerSubtract);
 
   DCHECK_EQ(1, node->op()->EffectInputCount());
   DCHECK_EQ(1, node->op()->EffectOutputCount());

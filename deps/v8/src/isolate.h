@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <memory>
 #include <queue>
+#include <vector>
 
 #include "include/v8-debug.h"
 #include "src/allocation.h"
@@ -17,7 +18,6 @@
 #include "src/date.h"
 #include "src/debug/debug-interface.h"
 #include "src/execution.h"
-#include "src/frames.h"
 #include "src/futex-emulation.h"
 #include "src/global-handles.h"
 #include "src/handles.h"
@@ -26,8 +26,6 @@
 #include "src/regexp/regexp-stack.h"
 #include "src/runtime/runtime.h"
 #include "src/zone/zone.h"
-
-class TestIsolate;
 
 namespace v8 {
 
@@ -41,29 +39,32 @@ class ConsoleDelegate;
 
 namespace internal {
 
+namespace heap {
+class HeapTester;
+}  // namespace heap
+
 class AccessCompilerData;
 class AddressToIndexHashMap;
 class AstStringConstants;
 class BasicBlockProfiler;
 class Bootstrapper;
-class CancelableTaskManager;
 class CallInterfaceDescriptorData;
-class CodeAgingHelper;
+class CancelableTaskManager;
 class CodeEventDispatcher;
 class CodeGenerator;
 class CodeRange;
 class CodeStubDescriptor;
 class CodeTracer;
 class CompilationCache;
-class CompilerDispatcher;
 class CompilationStatistics;
+class CompilerDispatcher;
 class ContextSlotCache;
 class Counters;
 class CpuFeatures;
 class CpuProfiler;
+class Debug;
 class DeoptimizerData;
 class DescriptorLookupCache;
-class Deserializer;
 class EmptyStatement;
 class ExternalCallbackScope;
 class ExternalReferenceTable;
@@ -76,11 +77,16 @@ class InnerPointerToCodeCache;
 class Logger;
 class MaterializedObjectStore;
 class OptimizingCompileDispatcher;
+class PromiseOnStack;
+class Redirection;
 class RegExpStack;
 class RootVisitor;
 class RuntimeProfiler;
 class SaveContext;
 class SetupIsolateDelegate;
+class Simulator;
+class StartupDeserializer;
+class StandardFrame;
 class StatsTable;
 class StringTracker;
 class StubCache;
@@ -89,18 +95,13 @@ class ThreadManager;
 class ThreadState;
 class ThreadVisitor;  // Defined in v8threads.h
 class UnicodeCache;
+
 template <StateTag Tag> class VMState;
 
 // 'void function pointer', used to roundtrip the
 // ExternalReference::ExternalReferenceRedirector since we can not include
 // assembler.h, where it is defined, here.
 typedef void* ExternalReferenceRedirectorPointer();
-
-
-class Debug;
-class PromiseOnStack;
-class Redirection;
-class Simulator;
 
 namespace interpreter {
 class Interpreter;
@@ -110,12 +111,13 @@ namespace wasm {
 class CompilationManager;
 }
 
-#define RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate)    \
-  do {                                                    \
-    Isolate* __isolate__ = (isolate);                     \
-    if (__isolate__->has_scheduled_exception()) {         \
-      return __isolate__->PromoteScheduledException();    \
-    }                                                     \
+#define RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate) \
+  do {                                                 \
+    Isolate* __isolate__ = (isolate);                  \
+    DCHECK(!__isolate__->has_pending_exception());     \
+    if (__isolate__->has_scheduled_exception()) {      \
+      return __isolate__->PromoteScheduledException(); \
+    }                                                  \
   } while (false)
 
 // Macros for MaybeHandle.
@@ -123,6 +125,7 @@ class CompilationManager;
 #define RETURN_VALUE_IF_SCHEDULED_EXCEPTION(isolate, value) \
   do {                                                      \
     Isolate* __isolate__ = (isolate);                       \
+    DCHECK(!__isolate__->has_pending_exception());          \
     if (__isolate__->has_scheduled_exception()) {           \
       __isolate__->PromoteScheduledException();             \
       return value;                                         \
@@ -160,6 +163,7 @@ class CompilationManager;
       DCHECK(__isolate__->has_pending_exception()); \
       return __isolate__->heap()->exception();      \
     }                                               \
+    DCHECK(!__isolate__->has_pending_exception());  \
     return *__result__;                             \
   } while (false)
 
@@ -323,6 +327,9 @@ class ThreadLocalTop BASE_EMBEDDED {
   Context* context_;
   ThreadId thread_id_;
   Object* pending_exception_;
+  // TODO(kschimpf): Change this to a stack of caught exceptions (rather than
+  // just innermost catching try block).
+  Object* wasm_caught_exception_;
 
   // Communication channel between Isolate::FindHandler and the CEntryStub.
   Context* pending_handler_context_;
@@ -422,7 +429,7 @@ typedef std::vector<HeapObject*> DebugObjectCache;
   V(DebugObjectCache*, string_stream_debug_object_cache, nullptr)             \
   V(Object*, string_stream_current_security_token, nullptr)                   \
   V(ExternalReferenceTable*, external_reference_table, nullptr)               \
-  V(intptr_t*, api_external_references, nullptr)                              \
+  V(const intptr_t*, api_external_references, nullptr)                        \
   V(AddressToIndexHashMap*, external_reference_map, nullptr)                  \
   V(HeapObjectToIndexHashMap*, root_index_map, nullptr)                       \
   V(int, pending_microtask_count, 0)                                          \
@@ -441,6 +448,7 @@ typedef std::vector<HeapObject*> DebugObjectCache;
   V(bool, needs_side_effect_check, false)                                     \
   /* Current code coverage mode */                                            \
   V(debug::Coverage::Mode, code_coverage_mode, debug::Coverage::kBestEffort)  \
+  V(debug::TypeProfile::Mode, type_profile_mode, debug::TypeProfile::kNone)   \
   V(int, last_stack_frame_info_id, 0)                                         \
   V(int, last_console_context_id, 0)                                          \
   ISOLATE_INIT_SIMULATOR_LIST(V)
@@ -537,7 +545,7 @@ class Isolate {
   void InitializeLoggingAndCounters();
   bool InitializeCounters();  // Returns false if already initialized.
 
-  bool Init(Deserializer* des);
+  bool Init(StartupDeserializer* des);
 
   // True if at least one thread Enter'ed this isolate.
   bool IsInUse() { return entry_stack_ != NULL; }
@@ -598,6 +606,11 @@ class Isolate {
   inline Object* pending_exception();
   inline void set_pending_exception(Object* exception_obj);
   inline void clear_pending_exception();
+
+  // Interface to wasm caught exception.
+  inline Object* get_wasm_caught_exception() const;
+  inline void set_wasm_caught_exception(Object* exception_obj);
+  inline void clear_wasm_caught_exception();
 
   THREAD_LOCAL_TOP_ADDRESS(Object*, pending_exception)
 
@@ -888,7 +901,6 @@ class Isolate {
   Heap* heap() { return &heap_; }
   StubCache* load_stub_cache() { return load_stub_cache_; }
   StubCache* store_stub_cache() { return store_stub_cache_; }
-  CodeAgingHelper* code_aging_helper() { return code_aging_helper_; }
   DeoptimizerData* deoptimizer_data() { return deoptimizer_data_; }
   bool deoptimizer_lazy_throw() const { return deoptimizer_lazy_throw_; }
   void set_deoptimizer_lazy_throw(bool value) {
@@ -952,7 +964,7 @@ class Isolate {
     total_regexp_code_generated_ += size;
   }
 
-  List<int>* regexp_indices() { return &regexp_indices_; }
+  std::vector<int>* regexp_indices() { return &regexp_indices_; }
 
   unibrow::Mapping<unibrow::Ecma262Canonicalize>*
       interp_canonicalize_mapping() {
@@ -1030,6 +1042,10 @@ class Isolate {
     return is_block_count_code_coverage() || is_block_binary_code_coverage();
   }
 
+  bool is_collecting_type_profile() const {
+    return type_profile_mode() == debug::TypeProfile::kCollect;
+  }
+
   void SetCodeCoverageList(Object* value);
 
   double time_millis_since_init() {
@@ -1046,8 +1062,6 @@ class Isolate {
     }
     date_cache_ = date_cache;
   }
-
-  Map* get_initial_js_array_map(ElementsKind kind);
 
   static const int kProtectorValid = 1;
   static const int kProtectorInvalid = 0;
@@ -1153,7 +1167,7 @@ class Isolate {
 
   void AddMicrotasksCompletedCallback(MicrotasksCompletedCallback callback);
   void RemoveMicrotasksCompletedCallback(MicrotasksCompletedCallback callback);
-  void FireMicrotasksCompletedCallback();
+  inline void FireMicrotasksCompletedCallback();
 
   void SetPromiseRejectCallback(PromiseRejectCallback callback);
   void ReportPromiseReject(Handle<JSObject> promise, Handle<Object> value,
@@ -1197,7 +1211,9 @@ class Isolate {
   void AddDetachedContext(Handle<Context> context);
   void CheckDetachedContextsAfterGC();
 
-  List<Object*>* partial_snapshot_cache() { return &partial_snapshot_cache_; }
+  std::vector<Object*>* partial_snapshot_cache() {
+    return &partial_snapshot_cache_;
+  }
 
   void set_array_buffer_allocator(v8::ArrayBuffer::Allocator* allocator) {
     array_buffer_allocator_ = allocator;
@@ -1233,7 +1249,7 @@ class Isolate {
   void SetHostImportModuleDynamicallyCallback(
       HostImportModuleDynamicallyCallback callback);
   MaybeHandle<JSPromise> RunHostImportModuleDynamicallyCallback(
-      Handle<String> referrer, Handle<Object> specifier);
+      Handle<Script> referrer, Handle<Object> specifier);
 
   void SetRAILMode(RAILMode rail_mode);
 
@@ -1445,7 +1461,6 @@ class Isolate {
   StackGuard stack_guard_;
   StubCache* load_stub_cache_;
   StubCache* store_stub_cache_;
-  CodeAgingHelper* code_aging_helper_;
   DeoptimizerData* deoptimizer_data_;
   bool deoptimizer_lazy_throw_;
   MaterializedObjectStore* materialized_object_store_;
@@ -1471,7 +1486,7 @@ class Isolate {
   unibrow::Mapping<unibrow::Ecma262Canonicalize>
       regexp_macro_assembler_canonicalize_;
   RegExpStack* regexp_stack_;
-  List<int> regexp_indices_;
+  std::vector<int> regexp_indices_;
   DateCache* date_cache_;
   CallInterfaceDescriptorData* call_descriptor_data_;
   AccessCompilerData* access_compiler_data_;
@@ -1556,20 +1571,20 @@ class Isolate {
   int next_unique_sfi_id_;
 #endif
 
-  // List of callbacks before a Call starts execution.
-  List<BeforeCallEnteredCallback> before_call_entered_callbacks_;
+  // Vector of callbacks before a Call starts execution.
+  std::vector<BeforeCallEnteredCallback> before_call_entered_callbacks_;
 
-  // List of callbacks when a Call completes.
-  List<CallCompletedCallback> call_completed_callbacks_;
+  // Vector of callbacks when a Call completes.
+  std::vector<CallCompletedCallback> call_completed_callbacks_;
 
-  // List of callbacks after microtasks were run.
-  List<MicrotasksCompletedCallback> microtasks_completed_callbacks_;
+  // Vector of callbacks after microtasks were run.
+  std::vector<MicrotasksCompletedCallback> microtasks_completed_callbacks_;
   bool is_running_microtasks_;
 
   v8::Isolate::UseCounterCallback use_counter_callback_;
   BasicBlockProfiler* basic_block_profiler_;
 
-  List<Object*> partial_snapshot_cache_;
+  std::vector<Object*> partial_snapshot_cache_;
 
   v8::ArrayBuffer::Allocator* array_buffer_allocator_;
 
@@ -1603,18 +1618,18 @@ class Isolate {
 
   friend class ExecutionAccess;
   friend class HandleScopeImplementer;
-  friend class HeapTester;
+  friend class heap::HeapTester;
   friend class OptimizingCompileDispatcher;
   friend class SweeperThread;
   friend class ThreadManager;
   friend class Simulator;
   friend class StackGuard;
+  friend class TestIsolate;
   friend class ThreadId;
   friend class v8::Isolate;
   friend class v8::Locker;
   friend class v8::Unlocker;
   friend class v8::SnapshotCreator;
-  friend class ::TestIsolate;
   friend v8::StartupData v8::V8::CreateSnapshotDataBlob(const char*);
   friend v8::StartupData v8::V8::WarmUpSnapshotDataBlob(v8::StartupData,
                                                         const char*);
@@ -1652,9 +1667,7 @@ class SaveContext BASE_EMBEDDED {
   SaveContext* prev() { return prev_; }
 
   // Returns true if this save context is below a given JavaScript frame.
-  bool IsBelowFrame(StandardFrame* frame) {
-    return (c_entry_fp_ == 0) || (c_entry_fp_ > frame->sp());
-  }
+  bool IsBelowFrame(StandardFrame* frame);
 
  private:
   Isolate* const isolate_;

@@ -11,7 +11,7 @@
 #include "src/compiler/code-generator-impl.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/pipeline.h"
-#include "src/frames-inl.h"
+#include "src/frames.h"
 #include "src/macro-assembler-inl.h"
 
 namespace v8 {
@@ -38,7 +38,8 @@ class CodeGenerator::JumpTable final : public ZoneObject {
 CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
                              InstructionSequence* code, CompilationInfo* info,
                              base::Optional<OsrHelper> osr_helper,
-                             int start_source_position)
+                             int start_source_position,
+                             JumpOptimizationInfo* jump_opt)
     : zone_(codegen_zone),
       frame_access_state_(nullptr),
       linkage_(linkage),
@@ -59,6 +60,7 @@ CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
       inlined_function_count_(0),
       translations_(zone()),
       last_lazy_deopt_pc_(0),
+      caller_registers_saved_(false),
       jump_tables_(nullptr),
       ools_(nullptr),
       osr_helper_(osr_helper),
@@ -72,6 +74,7 @@ CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
   }
   CreateFrameAccessState(frame);
   CHECK_EQ(info->is_osr(), osr_helper_.has_value());
+  tasm_.set_jump_optimization_info(jump_opt);
 }
 
 Isolate* CodeGenerator::isolate() const { return info_->isolate(); }
@@ -79,6 +82,37 @@ Isolate* CodeGenerator::isolate() const { return info_->isolate(); }
 void CodeGenerator::CreateFrameAccessState(Frame* frame) {
   FinishFrame(frame);
   frame_access_state_ = new (zone()) FrameAccessState(frame);
+}
+
+CodeGenerator::CodeGenResult CodeGenerator::AssembleDeoptimizerCall(
+    int deoptimization_id, SourcePosition pos) {
+  DeoptimizeKind deopt_kind = GetDeoptimizationKind(deoptimization_id);
+  Deoptimizer::BailoutType bailout_type;
+  switch (deopt_kind) {
+    case DeoptimizeKind::kSoft: {
+      bailout_type = Deoptimizer::SOFT;
+      break;
+    }
+    case DeoptimizeKind::kEager: {
+      bailout_type = Deoptimizer::EAGER;
+      break;
+    }
+    case DeoptimizeKind::kLazy: {
+      bailout_type = Deoptimizer::LAZY;
+      break;
+    }
+    default: { UNREACHABLE(); }
+  }
+  DeoptimizeReason deoptimization_reason =
+      GetDeoptimizationReason(deoptimization_id);
+  Address deopt_entry = Deoptimizer::GetDeoptimizationEntry(
+      tasm()->isolate(), deoptimization_id, bailout_type);
+  if (deopt_entry == nullptr) return kTooManyDeoptimizationBailouts;
+  if (info()->is_source_positions_enabled()) {
+    tasm()->RecordDeoptReason(deoptimization_reason, pos, deoptimization_id);
+  }
+  tasm()->CallForDeoptimization(deopt_entry, RelocInfo::RUNTIME_ENTRY);
+  return kSuccess;
 }
 
 void CodeGenerator::AssembleCode() {
@@ -97,8 +131,16 @@ void CodeGenerator::AssembleCode() {
   if (linkage()->GetIncomingDescriptor()->IsJSFunctionCall()) {
     ProfileEntryHookStub::MaybeCallEntryHookDelayed(tasm(), zone());
   }
-  // Architecture-specific, linkage-specific prologue.
-  info->set_prologue_offset(tasm()->pc_offset());
+
+  // TODO(jupvfranco): This should be the first thing in the code,
+  // or otherwise MaybeCallEntryHookDelayed may happen twice (for
+  // optimized and deoptimized code).
+  // We want to bailout only from JS functions, which are the only ones
+  // that are optimized.
+  if (info->IsOptimizing()) {
+    DCHECK(linkage()->GetIncomingDescriptor()->IsJSFunctionCall());
+    BailoutIfDeoptimized();
+  }
 
   // Define deoptimization literals for all inlined functions.
   DCHECK_EQ(0u, deoptimization_literals_.size());
@@ -121,10 +163,11 @@ void CodeGenerator::AssembleCode() {
       if (block->IsDeferred() == (deferred == 0)) {
         continue;
       }
+
       // Align loop headers on 16-byte boundaries.
-      if (block->IsLoopHeader()) tasm()->Align(16);
-      // Ensure lazy deopt doesn't patch handler entry points.
-      if (block->IsHandler()) EnsureSpaceForLazyDeopt();
+      if (block->IsLoopHeader() && !tasm()->jump_optimization_info()) {
+        tasm()->Align(16);
+      }
       // Bind a label for a block.
       current_block_ = block->rpo_number();
       unwinding_info_writer_.BeginInstructionBlock(tasm()->pc_offset(), block);
@@ -191,22 +234,24 @@ void CodeGenerator::AssembleCode() {
     }
   }
 
-  // Assemble all eager deoptimization exits.
+  // This nop operation is needed to ensure that the trampoline is not
+  // confused with the pc of the call before deoptimization.
+  // The test regress/regress-259 is an example of where we need it.
+  tasm()->nop();
+
+  // Assemble deoptimization exits.
+  int last_updated = 0;
   for (DeoptimizationExit* exit : deoptimization_exits_) {
     tasm()->bind(exit->label());
     int trampoline_pc = tasm()->pc_offset();
     int deoptimization_id = exit->deoptimization_id();
     DeoptimizationState* ds = deoptimization_states_[deoptimization_id];
-    ds->set_trampoline_pc(trampoline_pc);
-    AssembleDeoptimizerCall(deoptimization_id, exit->pos());
-  }
 
-  // Ensure there is space for lazy deoptimization in the code.
-  if (info->ShouldEnsureSpaceForLazyDeopt()) {
-    int target_offset = tasm()->pc_offset() + Deoptimizer::patch_size();
-    while (tasm()->pc_offset() < target_offset) {
-      tasm()->nop();
+    if (ds->kind() == DeoptimizeKind::kLazy) {
+      last_updated = safepoints()->UpdateDeoptimizationInfo(
+          ds->pc_offset(), trampoline_pc, last_updated);
     }
+    AssembleDeoptimizerCall(deoptimization_id, exit->pos());
   }
 
   FinishCode();
@@ -257,11 +302,6 @@ Handle<Code> CodeGenerator::FinalizeCode() {
   }
 
   PopulateDeoptimizationData(result);
-
-  // Ensure there is space for lazy deoptimization in the relocation info.
-  if (info()->ShouldEnsureSpaceForLazyDeopt()) {
-    Deoptimizer::EnsureRelocSpaceForLazyDeoptimization(result);
-  }
 
   return result;
 }
@@ -328,16 +368,12 @@ bool CodeGenerator::IsValidPush(InstructionOperand source,
       ((push_type & CodeGenerator::kImmediatePush) != 0)) {
     return true;
   }
-  if ((source.IsRegister() || source.IsStackSlot()) &&
-      ((push_type & CodeGenerator::kScalarPush) != 0)) {
+  if (source.IsRegister() &&
+      ((push_type & CodeGenerator::kRegisterPush) != 0)) {
     return true;
   }
-  if ((source.IsFloatRegister() || source.IsFloatStackSlot()) &&
-      ((push_type & CodeGenerator::kFloat32Push) != 0)) {
-    return true;
-  }
-  if ((source.IsDoubleRegister() || source.IsFloatStackSlot()) &&
-      ((push_type & CodeGenerator::kFloat64Push) != 0)) {
+  if (source.IsStackSlot() &&
+      ((push_type & CodeGenerator::kStackSlotPush) != 0)) {
     return true;
   }
   return false;
@@ -503,10 +539,10 @@ void CodeGenerator::AssembleSourcePosition(SourcePosition source_position) {
                                              source_position, false);
   if (FLAG_code_comments) {
     CompilationInfo* info = this->info();
-    if (!info->parse_info()) return;
+    if (info->IsStub()) return;
     std::ostringstream buffer;
     buffer << "-- ";
-    if (FLAG_trace_turbo ||
+    if (FLAG_trace_turbo || FLAG_trace_turbo_graph ||
         tasm()->isolate()->concurrent_recompilation_enabled()) {
       buffer << source_position;
     } else {
@@ -596,11 +632,11 @@ void CodeGenerator::PopulateDeoptimizationData(Handle<Code> code_object) {
 
   if (info->is_osr()) {
     DCHECK(osr_pc_offset_ >= 0);
-    data->SetOsrBytecodeOffset(Smi::FromInt(info_->osr_ast_id().ToInt()));
+    data->SetOsrBytecodeOffset(Smi::FromInt(info_->osr_offset().ToInt()));
     data->SetOsrPcOffset(Smi::FromInt(osr_pc_offset_));
   } else {
-    BailoutId osr_ast_id = BailoutId::None();
-    data->SetOsrBytecodeOffset(Smi::FromInt(osr_ast_id.ToInt()));
+    BailoutId osr_offset = BailoutId::None();
+    data->SetOsrBytecodeOffset(Smi::FromInt(osr_offset.ToInt()));
     data->SetOsrPcOffset(Smi::FromInt(-1));
   }
 
@@ -611,8 +647,6 @@ void CodeGenerator::PopulateDeoptimizationData(Handle<Code> code_object) {
     CHECK(deoptimization_state);
     data->SetTranslationIndex(
         i, Smi::FromInt(deoptimization_state->translation_id()));
-    data->SetTrampolinePc(i,
-                          Smi::FromInt(deoptimization_state->trampoline_pc()));
     data->SetPc(i, Smi::FromInt(deoptimization_state->pc_offset()));
   }
 
@@ -655,7 +689,6 @@ void CodeGenerator::RecordCallPosition(Instruction* instr) {
     DeoptimizationExit* const exit = new (zone())
         DeoptimizationExit(deopt_state_id, current_source_position_);
     deoptimization_exits_.push_back(exit);
-
     safepoints()->RecordLazyDeoptimizationIndex(deopt_state_id);
   }
 }
@@ -705,11 +738,11 @@ void CodeGenerator::TranslateStateValueDescriptor(
     }
   } else if (desc->IsArgumentsElements()) {
     if (translation != nullptr) {
-      translation->ArgumentsElements(desc->is_rest());
+      translation->ArgumentsElements(desc->arguments_type());
     }
   } else if (desc->IsArgumentsLength()) {
     if (translation != nullptr) {
-      translation->ArgumentsLength(desc->is_rest());
+      translation->ArgumentsLength(desc->arguments_type());
     }
   } else if (desc->IsDuplicate()) {
     if (translation != nullptr) {
@@ -1001,6 +1034,10 @@ OutOfLineCode::OutOfLineCode(CodeGenerator* gen)
 }
 
 OutOfLineCode::~OutOfLineCode() {}
+
+Handle<Object> DeoptimizationLiteral::Reify(Isolate* isolate) const {
+  return object_.is_null() ? isolate->factory()->NewNumber(number_) : object_;
+}
 
 }  // namespace compiler
 }  // namespace internal

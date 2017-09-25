@@ -61,7 +61,7 @@ ARCH_GUESS = utils.DefaultArch()
 
 # Map of test name synonyms to lists of test suites. Should be ordered by
 # expected runtimes (suites with slow test cases first). These groups are
-# invoked in seperate steps on the bots.
+# invoked in separate steps on the bots.
 TEST_MAP = {
   # This needs to stay in sync with test/bot_default.isolate.
   "bot_default": [
@@ -114,8 +114,7 @@ VARIANTS = ["default"]
 MORE_VARIANTS = [
   "stress",
   "nooptimization",
-  "fullcode",
-  "asm_wasm",
+  "stress_asm_wasm",
   "wasm_traps",
 ]
 
@@ -277,10 +276,11 @@ def BuildOptions():
   result.add_option("--no-i18n", "--noi18n",
                     help="Skip internationalization tests",
                     default=False, action="store_true")
+  result.add_option("--network", help="Distribute tests on the network",
+                    default=False, dest="network", action="store_true")
   result.add_option("--no-network", "--nonetwork",
                     help="Don't distribute tests on the network",
-                    default=(utils.GuessOS() != "linux"),
-                    dest="no_network", action="store_true")
+                    dest="network", action="store_false")
   result.add_option("--no-presubmit", "--nopresubmit",
                     help='Skip presubmit checks (deprecated)',
                     default=False, dest="no_presubmit", action="store_true")
@@ -364,8 +364,11 @@ def BuildOptions():
   result.add_option("--random-seed-stress-count", default=1, type="int",
                     dest="random_seed_stress_count",
                     help="Number of runs with different random seeds")
+  result.add_option("--ubsan-vptr",
+                    help="Regard test expectations for UBSanVptr",
+                    default=False, action="store_true")
   result.add_option("--msan",
-                    help="Regard test expectations for MSAN",
+                    help="Regard test expectations for UBSanVptr",
                     default=False, action="store_true")
   return result
 
@@ -420,6 +423,12 @@ def SetupEnvironment(options):
       'print_stacktrace=1',
       'print_summary=1',
       'symbolize=1',
+      symbolizer,
+    ])
+
+  if options.ubsan_vptr:
+    os.environ['UBSAN_OPTIONS'] = ":".join([
+      'print_stacktrace=1',
       symbolizer,
     ])
 
@@ -502,7 +511,8 @@ def ProcessOptions(options):
         ('msan', build_config["is_msan"]),
         ('no_i18n', not build_config["v8_enable_i18n_support"]),
         ('no_snap', not build_config["v8_use_snapshot"]),
-        ('tsan', build_config["is_tsan"])):
+        ('tsan', build_config["is_tsan"]),
+        ('ubsan_vptr', build_config["is_ubsan_vptr"])):
       cmd_line_value = getattr(options, param)
       if cmd_line_value not in [None, True, False] and cmd_line_value != value:
         # TODO(machenbach): This is for string options only. Requires options
@@ -554,11 +564,11 @@ def ProcessOptions(options):
   # Special processing of other options, sorted alphabetically.
 
   if options.buildbot:
-    options.no_network = True
-  if options.command_prefix:
+    options.network = False
+  if options.command_prefix and options.network:
     print("Specifying --command-prefix disables network distribution, "
           "running tests locally.")
-    options.no_network = True
+    options.network = False
   options.command_prefix = shlex.split(options.command_prefix)
   options.extra_flags = sum(map(shlex.split, options.extra_flags), [])
 
@@ -632,7 +642,7 @@ def ProcessOptions(options):
       options.shell_dir = os.path.dirname(options.shell)
   if options.valgrind:
     run_valgrind = os.path.join("tools", "run-valgrind.py")
-    # This is OK for distributed running, so we don't need to set no_network.
+    # This is OK for distributed running, so we don't need to disable network.
     options.command_prefix = (["python", "-u", run_valgrind] +
                               options.command_prefix)
   def CheckTestMode(name, option):
@@ -831,7 +841,8 @@ def Execute(arch, mode, args, options, suites):
     "novfp3": options.novfp3,
     "predictable": options.predictable,
     "byteorder": sys.byteorder,
-    "no_harness": options.no_harness
+    "no_harness": options.no_harness,
+    "ubsan_vptr": options.ubsan_vptr,
   }
   all_tests = []
   num_tests = 0
@@ -902,7 +913,7 @@ def Execute(arch, mode, args, options, suites):
     progress_indicator.Register(progress.FlakinessTestProgressIndicator(
         options.flakiness_results))
 
-  run_networked = not options.no_network
+  run_networked = options.network
   if not run_networked:
     if options.verbose:
       print("Network distribution disabled, running tests locally.")

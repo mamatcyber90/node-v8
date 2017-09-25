@@ -11,7 +11,6 @@
 #include "src/compiler/opcodes.h"
 #include "src/compiler/operator.h"
 #include "src/handles-inl.h"
-#include "src/objects-inl.h"
 #include "src/zone/zone.h"
 
 namespace v8 {
@@ -95,6 +94,7 @@ SelectParameters const& SelectParametersOf(const Operator* const op) {
 
 CallDescriptor const* CallDescriptorOf(const Operator* const op) {
   DCHECK(op->opcode() == IrOpcode::kCall ||
+         op->opcode() == IrOpcode::kCallWithCallerSavedRegisters ||
          op->opcode() == IrOpcode::kTailCall);
   return OpParameter<CallDescriptor const*>(op);
 }
@@ -140,6 +140,22 @@ std::ostream& operator<<(std::ostream& os, ParameterInfo const& i) {
   if (i.debug_name()) os << i.debug_name() << '#';
   os << i.index();
   return os;
+}
+
+std::ostream& operator<<(std::ostream& os, ObjectStateInfo const& i) {
+  return os << "id:" << i.object_id() << "|size:" << i.size();
+}
+
+size_t hash_value(ObjectStateInfo const& p) {
+  return base::hash_combine(p.object_id(), p.size());
+}
+
+std::ostream& operator<<(std::ostream& os, TypedObjectStateInfo const& i) {
+  return os << "id:" << i.object_id() << "|" << i.machine_types();
+}
+
+size_t hash_value(TypedObjectStateInfo const& p) {
+  return base::hash_combine(p.object_id(), p.machine_types());
 }
 
 bool operator==(RelocatablePtrConstantInfo const& lhs,
@@ -281,6 +297,11 @@ RegionObservability RegionObservabilityOf(Operator const* op) {
   return OpParameter<RegionObservability>(op);
 }
 
+ZoneHandleSet<Map> MapGuardMapsOf(Operator const* op) {
+  DCHECK_EQ(IrOpcode::kMapGuard, op->opcode());
+  return OpParameter<ZoneHandleSet<Map>>(op);
+}
+
 Type* TypeGuardTypeOf(Operator const* op) {
   DCHECK_EQ(IrOpcode::kTypeGuard, op->opcode());
   return OpParameter<Type*>(op);
@@ -322,10 +343,10 @@ ZoneVector<MachineType> const* MachineTypesOf(Operator const* op) {
   if (op->opcode() == IrOpcode::kTypedStateValues) {
     return OpParameter<TypedStateValueInfo>(op).machine_types();
   }
-  return OpParameter<const ZoneVector<MachineType>*>(op);
+  return OpParameter<TypedObjectStateInfo>(op).machine_types();
 }
 
-#define CACHED_OP_LIST(V)                                                     \
+#define COMMON_CACHED_OP_LIST(V)                                              \
   V(Dead, Operator::kFoldable, 0, 0, 0, 1, 1, 1)                              \
   V(IfTrue, Operator::kKontrol, 0, 0, 1, 0, 0, 1)                             \
   V(IfFalse, Operator::kKontrol, 0, 0, 1, 0, 0, 1)                            \
@@ -485,7 +506,7 @@ struct CommonOperatorGlobalCache final {
                    control_output_count) {}                                  \
   };                                                                         \
   Name##Operator k##Name##Operator;
-  CACHED_OP_LIST(CACHED)
+  COMMON_CACHED_OP_LIST(CACHED)
 #undef CACHED
 
   template <size_t kInputCount>
@@ -736,14 +757,11 @@ struct CommonOperatorGlobalCache final {
 #undef CACHED_STATE_VALUES
 };
 
-
-static base::LazyInstance<CommonOperatorGlobalCache>::type kCache =
-    LAZY_INSTANCE_INITIALIZER;
-
+static base::LazyInstance<CommonOperatorGlobalCache>::type
+    kCommonOperatorGlobalCache = LAZY_INSTANCE_INITIALIZER;
 
 CommonOperatorBuilder::CommonOperatorBuilder(Zone* zone)
-    : cache_(kCache.Get()), zone_(zone) {}
-
+    : cache_(kCommonOperatorGlobalCache.Get()), zone_(zone) {}
 
 #define CACHED(Name, properties, value_input_count, effect_input_count,      \
                control_input_count, value_output_count, effect_output_count, \
@@ -751,7 +769,7 @@ CommonOperatorBuilder::CommonOperatorBuilder(Zone* zone)
   const Operator* CommonOperatorBuilder::Name() {                            \
     return &cache_.k##Name##Operator;                                        \
   }
-CACHED_OP_LIST(CACHED)
+COMMON_CACHED_OP_LIST(CACHED)
 #undef CACHED
 
 
@@ -1076,6 +1094,14 @@ const Operator* CommonOperatorBuilder::RelocatableInt64Constant(
       RelocatablePtrConstantInfo(value, rmode));              // parameter
 }
 
+const Operator* CommonOperatorBuilder::ObjectId(uint32_t object_id) {
+  return new (zone()) Operator1<uint32_t>(   // --
+      IrOpcode::kObjectId, Operator::kPure,  // opcode
+      "ObjectId",                            // name
+      0, 0, 0, 1, 0, 0,                      // counts
+      object_id);                            // parameter
+}
+
 const Operator* CommonOperatorBuilder::Select(MachineRepresentation rep,
                                               BranchHint hint) {
   return new (zone()) Operator1<SelectParameters>(  // --
@@ -1102,6 +1128,14 @@ const Operator* CommonOperatorBuilder::Phi(MachineRepresentation rep,
       "Phi",                                             // name
       value_input_count, 0, 1, 1, 0, 0,                  // counts
       rep);                                              // parameter
+}
+
+const Operator* CommonOperatorBuilder::MapGuard(ZoneHandleSet<Map> maps) {
+  return new (zone()) Operator1<ZoneHandleSet<Map>>(  // --
+      IrOpcode::kMapGuard, Operator::kEliminatable,   // opcode
+      "MapGuard",                                     // name
+      1, 1, 1, 0, 1, 0,                               // counts
+      maps);                                          // parameter
 }
 
 const Operator* CommonOperatorBuilder::TypeGuard(Type* type) {
@@ -1200,41 +1234,59 @@ const Operator* CommonOperatorBuilder::TypedStateValues(
       TypedStateValueInfo(types, bitmask));            // parameters
 }
 
-const Operator* CommonOperatorBuilder::ArgumentsElementsState(bool is_rest) {
-  return new (zone()) Operator1<bool>(                     // --
+const Operator* CommonOperatorBuilder::ArgumentsElementsState(
+    ArgumentsStateType type) {
+  return new (zone()) Operator1<ArgumentsStateType>(       // --
       IrOpcode::kArgumentsElementsState, Operator::kPure,  // opcode
       "ArgumentsElementsState",                            // name
-      0, 0, 0, 1, 0, 0, is_rest);                          // counts
+      0, 0, 0, 1, 0, 0,                                    // counts
+      type);                                               // parameter
 }
 
-const Operator* CommonOperatorBuilder::ArgumentsLengthState(bool is_rest) {
-  return new (zone()) Operator1<bool>(                   // --
+const Operator* CommonOperatorBuilder::ArgumentsLengthState(
+    ArgumentsStateType type) {
+  return new (zone()) Operator1<ArgumentsStateType>(     // --
       IrOpcode::kArgumentsLengthState, Operator::kPure,  // opcode
       "ArgumentsLengthState",                            // name
-      0, 0, 0, 1, 0, 0, is_rest);                        // counts
+      0, 0, 0, 1, 0, 0,                                  // counts
+      type);                                             // parameter
 }
 
-bool IsRestOf(Operator const* op) {
+ArgumentsStateType ArgumentsStateTypeOf(Operator const* op) {
   DCHECK(op->opcode() == IrOpcode::kArgumentsElementsState ||
          op->opcode() == IrOpcode::kArgumentsLengthState);
-  return OpParameter<bool>(op);
+  return OpParameter<ArgumentsStateType>(op);
 }
 
-const Operator* CommonOperatorBuilder::ObjectState(int pointer_slots) {
-  return new (zone()) Operator1<int>(           // --
-      IrOpcode::kObjectState, Operator::kPure,  // opcode
-      "ObjectState",                            // name
-      pointer_slots, 0, 0, 1, 0, 0,             // counts
-      pointer_slots);                           // parameter
+const Operator* CommonOperatorBuilder::ObjectState(int object_id,
+                                                   int pointer_slots) {
+  return new (zone()) Operator1<ObjectStateInfo>(  // --
+      IrOpcode::kObjectState, Operator::kPure,     // opcode
+      "ObjectState",                               // name
+      pointer_slots, 0, 0, 1, 0, 0,                // counts
+      ObjectStateInfo{object_id, pointer_slots});  // parameter
 }
 
 const Operator* CommonOperatorBuilder::TypedObjectState(
-    const ZoneVector<MachineType>* types) {
-  return new (zone()) Operator1<const ZoneVector<MachineType>*>(  // --
-      IrOpcode::kTypedObjectState, Operator::kPure,               // opcode
-      "TypedObjectState",                                         // name
-      static_cast<int>(types->size()), 0, 0, 1, 0, 0,             // counts
-      types);                                                     // parameter
+    int object_id, const ZoneVector<MachineType>* types) {
+  return new (zone()) Operator1<TypedObjectStateInfo>(  // --
+      IrOpcode::kTypedObjectState, Operator::kPure,     // opcode
+      "TypedObjectState",                               // name
+      static_cast<int>(types->size()), 0, 0, 1, 0, 0,   // counts
+      TypedObjectStateInfo(object_id, types));          // parameter
+}
+
+uint32_t ObjectIdOf(Operator const* op) {
+  switch (op->opcode()) {
+    case IrOpcode::kObjectState:
+      return OpParameter<ObjectStateInfo>(op).object_id();
+    case IrOpcode::kTypedObjectState:
+      return OpParameter<TypedObjectStateInfo>(op).object_id();
+    case IrOpcode::kObjectId:
+      return OpParameter<uint32_t>(op);
+    default:
+      UNREACHABLE();
+  }
 }
 
 const Operator* CommonOperatorBuilder::FrameState(
@@ -1269,6 +1321,27 @@ const Operator* CommonOperatorBuilder::Call(const CallDescriptor* descriptor) {
   return new (zone()) CallOperator(descriptor);
 }
 
+const Operator* CommonOperatorBuilder::CallWithCallerSavedRegisters(
+    const CallDescriptor* descriptor) {
+  class CallOperator final : public Operator1<const CallDescriptor*> {
+   public:
+    explicit CallOperator(const CallDescriptor* descriptor)
+        : Operator1<const CallDescriptor*>(
+              IrOpcode::kCallWithCallerSavedRegisters, descriptor->properties(),
+              "CallWithCallerSavedRegisters",
+              descriptor->InputCount() + descriptor->FrameStateCount(),
+              Operator::ZeroIfPure(descriptor->properties()),
+              Operator::ZeroIfEliminatable(descriptor->properties()),
+              descriptor->ReturnCount(),
+              Operator::ZeroIfPure(descriptor->properties()),
+              Operator::ZeroIfNoThrow(descriptor->properties()), descriptor) {}
+
+    void PrintParameter(std::ostream& os, PrintVerbosity verbose) const {
+      os << "[" << *parameter() << "]";
+    }
+  };
+  return new (zone()) CallOperator(descriptor);
+}
 
 const Operator* CommonOperatorBuilder::TailCall(
     const CallDescriptor* descriptor) {
@@ -1287,7 +1360,6 @@ const Operator* CommonOperatorBuilder::TailCall(
   };
   return new (zone()) TailCallOperator(descriptor);
 }
-
 
 const Operator* CommonOperatorBuilder::Projection(size_t index) {
   switch (index) {

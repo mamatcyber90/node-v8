@@ -13,7 +13,7 @@ namespace internal {
 
 class StartupSerializer;
 
-class PartialSerializer : public Serializer {
+class PartialSerializer : public Serializer<> {
  public:
   PartialSerializer(Isolate* isolate, StartupSerializer* startup_serializer,
                     v8::SerializeEmbedderFieldsCallback callback);
@@ -36,7 +36,7 @@ class PartialSerializer : public Serializer {
   void CheckRehashability(HeapObject* table);
 
   StartupSerializer* startup_serializer_;
-  List<JSObject*> embedder_field_holders_;
+  std::vector<JSObject*> embedder_field_holders_;
   v8::SerializeEmbedderFieldsCallback serialize_embedder_fields_;
   GlobalDictionary* rehashable_global_dictionary_;
   // Indicates whether we only serialized hash tables that we can rehash.

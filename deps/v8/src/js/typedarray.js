@@ -25,8 +25,8 @@ var InnerArrayJoin;
 var InnerArraySort;
 var InnerArrayToLocaleString;
 var InternalArray = utils.InternalArray;
-var MaxSimple;
-var MinSimple;
+var MathMax = global.Math.max;
+var MathMin = global.Math.min;
 var iteratorSymbol = utils.ImportNow("iterator_symbol");
 var speciesSymbol = utils.ImportNow("species_symbol");
 var toStringTagSymbol = utils.ImportNow("to_string_tag_symbol");
@@ -59,8 +59,6 @@ utils.Import(function(from) {
   InnerArrayJoin = from.InnerArrayJoin;
   InnerArraySort = from.InnerArraySort;
   InnerArrayToLocaleString = from.InnerArrayToLocaleString;
-  MaxSimple = from.MaxSimple;
-  MinSimple = from.MinSimple;
 });
 
 // ES2015 7.3.20
@@ -208,15 +206,15 @@ function NAMESubArray(begin, end) {
   }
 
   if (beginInt < 0) {
-    beginInt = MaxSimple(0, srcLength + beginInt);
+    beginInt = MathMax(0, srcLength + beginInt);
   } else {
-    beginInt = MinSimple(beginInt, srcLength);
+    beginInt = MathMin(beginInt, srcLength);
   }
 
   if (endInt < 0) {
-    endInt = MaxSimple(0, srcLength + endInt);
+    endInt = MathMax(0, srcLength + endInt);
   } else {
-    endInt = MinSimple(endInt, srcLength);
+    endInt = MathMin(endInt, srcLength);
   }
 
   if (endInt < beginInt) {
@@ -246,123 +244,6 @@ TYPED_ARRAYS(TYPED_ARRAY_SUBARRAY_CASE)
     throw %make_type_error(kIncompatibleMethodReceiver,
                         "get %TypedArray%.prototype.subarray", this);
   }
-);
-%SetForceInlineFlag(GlobalTypedArray.prototype.subarray);
-
-
-
-function TypedArraySetFromArrayLike(target, source, sourceLength, offset) {
-  if (offset > 0) {
-    for (var i = 0; i < sourceLength; i++) {
-      target[offset + i] = source[i];
-    }
-  }
-  else {
-    for (var i = 0; i < sourceLength; i++) {
-      target[i] = source[i];
-    }
-  }
-}
-
-function TypedArraySetFromOverlappingTypedArray(target, source, offset) {
-  var sourceElementSize = source.BYTES_PER_ELEMENT;
-  var targetElementSize = target.BYTES_PER_ELEMENT;
-  var sourceLength = %_TypedArrayGetLength(source);
-
-  // Copy left part.
-  function CopyLeftPart() {
-    // First un-mutated byte after the next write
-    var targetPtr = %_ArrayBufferViewGetByteOffset(target) +
-                    (offset + 1) * targetElementSize;
-    // Next read at sourcePtr. We do not care for memory changing before
-    // sourcePtr - we have already copied it.
-    var sourcePtr = %_ArrayBufferViewGetByteOffset(source);
-    for (var leftIndex = 0;
-         leftIndex < sourceLength && targetPtr <= sourcePtr;
-         leftIndex++) {
-      target[offset + leftIndex] = source[leftIndex];
-      targetPtr += targetElementSize;
-      sourcePtr += sourceElementSize;
-    }
-    return leftIndex;
-  }
-  var leftIndex = CopyLeftPart();
-
-  // Copy right part;
-  function CopyRightPart() {
-    // First unmutated byte before the next write
-    var targetPtr = %_ArrayBufferViewGetByteOffset(target) +
-                    (offset + sourceLength - 1) * targetElementSize;
-    // Next read before sourcePtr. We do not care for memory changing after
-    // sourcePtr - we have already copied it.
-    var sourcePtr = %_ArrayBufferViewGetByteOffset(source) +
-                    sourceLength * sourceElementSize;
-    for(var rightIndex = sourceLength - 1;
-        rightIndex >= leftIndex && targetPtr >= sourcePtr;
-        rightIndex--) {
-      target[offset + rightIndex] = source[rightIndex];
-      targetPtr -= targetElementSize;
-      sourcePtr -= sourceElementSize;
-    }
-    return rightIndex;
-  }
-  var rightIndex = CopyRightPart();
-
-  var temp = new GlobalArray(rightIndex + 1 - leftIndex);
-  for (var i = leftIndex; i <= rightIndex; i++) {
-    temp[i - leftIndex] = source[i];
-  }
-  for (i = leftIndex; i <= rightIndex; i++) {
-    target[offset + i] = temp[i - leftIndex];
-  }
-}
-
-DEFINE_METHOD_LEN(
-  GlobalTypedArray.prototype,
-  set(obj, offset) {
-    var intOffset = IS_UNDEFINED(offset) ? 0 : TO_INTEGER(offset);
-    if (intOffset < 0) throw %make_type_error(kTypedArraySetNegativeOffset);
-
-    if (intOffset > %_MaxSmi()) {
-      throw %make_range_error(kTypedArraySetSourceTooLarge);
-    }
-
-    switch (%TypedArraySetFastCases(this, obj, intOffset)) {
-      // These numbers should be synchronized with runtime.cc.
-      case 0: // TYPED_ARRAY_SET_TYPED_ARRAY_SAME_TYPE
-        return;
-      case 1: // TYPED_ARRAY_SET_TYPED_ARRAY_OVERLAPPING
-        TypedArraySetFromOverlappingTypedArray(this, obj, intOffset);
-        return;
-      case 2: // TYPED_ARRAY_SET_TYPED_ARRAY_NONOVERLAPPING
-        if (intOffset === 0) {
-          %TypedArrayCopyElements(this, obj, %_TypedArrayGetLength(obj));
-        } else {
-          TypedArraySetFromArrayLike(
-              this, obj, %_TypedArrayGetLength(obj), intOffset);
-        }
-        return;
-      case 3: // TYPED_ARRAY_SET_NON_TYPED_ARRAY
-        var l = obj.length;
-        if (IS_UNDEFINED(l)) {
-          if (IS_NUMBER(obj)) {
-              // For number as a first argument, throw TypeError
-              // instead of silently ignoring the call, so that
-              // users know they did something wrong.
-              // (Consistent with Firefox and Blink/WebKit)
-              throw %make_type_error(kInvalidArgument);
-          }
-          return;
-        }
-        l = TO_LENGTH(l);
-        if (intOffset + l > %_TypedArrayGetLength(this)) {
-          throw %make_range_error(kTypedArraySetSourceTooLarge);
-        }
-        TypedArraySetFromArrayLike(this, obj, l, intOffset);
-        return;
-    }
-  },
-  1  /* Set function length. */
 );
 
 
@@ -448,6 +329,10 @@ DEFINE_METHOD(
   GlobalTypedArray.prototype,
   sort(comparefn) {
     ValidateTypedArray(this, "%TypedArray%.prototype.sort");
+
+    if (!IS_UNDEFINED(comparefn) && !IS_CALLABLE(comparefn)) {
+      throw %make_type_error(kBadSortComparisonFunction, comparefn);
+    }
 
     var length = %_TypedArrayGetLength(this);
 

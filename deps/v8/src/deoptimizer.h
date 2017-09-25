@@ -5,9 +5,13 @@
 #ifndef V8_DEOPTIMIZER_H_
 #define V8_DEOPTIMIZER_H_
 
+#include <vector>
+
 #include "src/allocation.h"
+#include "src/base/macros.h"
+#include "src/boxed-float.h"
 #include "src/deoptimize-reason.h"
-#include "src/float.h"
+#include "src/frame-constants.h"
 #include "src/macro-assembler.h"
 #include "src/source-position.h"
 #include "src/zone/zone-chunk-list.h"
@@ -244,9 +248,9 @@ class TranslatedFrame {
 class TranslatedState {
  public:
   TranslatedState();
-  explicit TranslatedState(JavaScriptFrame* frame);
+  explicit TranslatedState(const JavaScriptFrame* frame);
 
-  void Prepare(bool has_adapted_arguments, Address stack_frame_pointer);
+  void Prepare(Address stack_frame_pointer);
 
   // Store newly materialized values into the isolate.
   void StoreMaterializedValuesAndDeopt(JavaScriptFrame* frame);
@@ -280,11 +284,12 @@ class TranslatedState {
   int CreateNextTranslatedValue(int frame_index, TranslationIterator* iterator,
                                 FixedArray* literal_array, Address fp,
                                 RegisterValues* registers, FILE* trace_file);
-  Address ComputeArgumentsPosition(Address input_frame_pointer, bool is_rest,
-                                   int* length);
+  Address ComputeArgumentsPosition(Address input_frame_pointer,
+                                   CreateArgumentsType type, int* length);
   void CreateArgumentsElementsTranslatedValues(int frame_index,
                                                Address input_frame_pointer,
-                                               bool is_rest, FILE* trace_file);
+                                               CreateArgumentsType type,
+                                               FILE* trace_file);
 
   void UpdateFromPreviouslyMaterializedObjects();
   Handle<Object> MaterializeAt(int frame_index, int* value_index);
@@ -373,13 +378,12 @@ class Deoptimizer : public Malloced {
     bool needs_frame;
   };
 
-  static bool TraceEnabledFor(StackFrame::Type frame_type);
   static const char* MessageFor(BailoutType type);
 
   int output_count() const { return output_count_; }
 
-  Handle<JSFunction> function() const { return Handle<JSFunction>(function_); }
-  Handle<Code> compiled_code() const { return Handle<Code>(compiled_code_); }
+  Handle<JSFunction> function() const;
+  Handle<Code> compiled_code() const;
   BailoutType bailout_type() const { return bailout_type_; }
 
   // Number of created JS frames. Not all created frames are necessarily JS.
@@ -399,13 +403,6 @@ class Deoptimizer : public Malloced {
                                                         int jsframe_index,
                                                         Isolate* isolate);
 
-  // Makes sure that there is enough room in the relocation
-  // information of a code object to perform lazy deoptimization
-  // patching. If there is not enough room a new relocation
-  // information object is allocated and comments are added until it
-  // is big enough.
-  static void EnsureRelocSpaceForLazyDeoptimization(Handle<Code> code);
-
   // Deoptimize the function now. Its current optimized code will never be run
   // again and any activations of the optimized code will get deoptimized when
   // execution returns. If {code} is specified then the given code is targeted
@@ -420,18 +417,9 @@ class Deoptimizer : public Malloced {
   // refer to that code.
   static void DeoptimizeMarkedCode(Isolate* isolate);
 
-  // Visit all the known optimized functions in a given isolate.
-  static void VisitAllOptimizedFunctions(
-      Isolate* isolate, OptimizedFunctionVisitor* visitor);
-
-  static void UnlinkOptimizedCode(Code* code, Context* native_context);
-
-  // The size in bytes of the code required at a lazy deopt patch site.
-  static int patch_size();
-
   ~Deoptimizer();
 
-  void MaterializeHeapObjects(JavaScriptFrameIterator* it);
+  void MaterializeHeapObjects();
 
   static void ComputeOutputFrames(Deoptimizer* deoptimizer);
 
@@ -504,7 +492,7 @@ class Deoptimizer : public Malloced {
 
   Deoptimizer(Isolate* isolate, JSFunction* function, BailoutType type,
               unsigned bailout_id, Address from, int fp_to_sp_delta);
-  Code* FindOptimizedCode(JSFunction* function);
+  Code* FindOptimizedCode();
   void PrintFunctionName();
   void DeleteFrameDescriptions();
 
@@ -545,15 +533,8 @@ class Deoptimizer : public Malloced {
   // Marks all the code in the given context for deoptimization.
   static void MarkAllCodeForContext(Context* native_context);
 
-  // Visit all the known optimized functions in a given context.
-  static void VisitAllOptimizedFunctionsForContext(
-      Context* context, OptimizedFunctionVisitor* visitor);
-
   // Deoptimizes all code marked in the given context.
   static void DeoptimizeMarkedCodeForContext(Context* native_context);
-
-  // Patch the given code so that it will deoptimize itself.
-  static void PatchCodeForDeoptimization(Isolate* isolate, Code* code);
 
   // Searches the list of known deoptimizing code for a Code object
   // containing the given address (which is supposedly faster than
@@ -656,8 +637,8 @@ class RegisterValues {
   static_assert(sizeof(Float64) == kDoubleSize, "size mismatch");
 
   intptr_t registers_[Register::kNumRegisters];
-  Float32 float_registers_[FloatRegister::kMaxNumRegisters];
-  Float64 double_registers_[DoubleRegister::kMaxNumRegisters];
+  Float32 float_registers_[FloatRegister::kNumRegisters];
+  Float64 double_registers_[DoubleRegister::kNumRegisters];
 };
 
 
@@ -680,6 +661,7 @@ class FrameDescription {
   }
 
   uint32_t GetFrameSize() const {
+    USE(frame_content_);
     DCHECK(static_cast<uint32_t>(frame_size_) == frame_size_);
     return static_cast<uint32_t>(frame_size_);
   }
@@ -744,9 +726,6 @@ class FrameDescription {
 
   void SetContinuation(intptr_t pc) { continuation_ = pc; }
 
-  StackFrame::Type GetFrameType() const { return type_; }
-  void SetFrameType(StackFrame::Type type) { type_ = type; }
-
   // Argument count, including receiver.
   int parameter_count() { return parameter_count_; }
 
@@ -792,7 +771,6 @@ class FrameDescription {
   intptr_t fp_;
   intptr_t context_;
   intptr_t constant_pool_;
-  StackFrame::Type type_;
   Smi* state_;
 
   // Continuation is the PC where the execution continues after
@@ -845,14 +823,11 @@ class TranslationBuffer BASE_EMBEDDED {
 
 class TranslationIterator BASE_EMBEDDED {
  public:
-  TranslationIterator(ByteArray* buffer, int index)
-      : buffer_(buffer), index_(index) {
-    DCHECK(index >= 0 && index < buffer->length());
-  }
+  TranslationIterator(ByteArray* buffer, int index);
 
   int32_t Next();
 
-  bool HasNext() const { return index_ < buffer_->length(); }
+  bool HasNext() const;
 
   void Skip(int n) {
     for (int i = 0; i < n; i++) Next();
@@ -923,8 +898,8 @@ class Translation BASE_EMBEDDED {
                                                int literal_id, unsigned height);
   void BeginGetterStubFrame(int literal_id);
   void BeginSetterStubFrame(int literal_id);
-  void ArgumentsElements(bool is_rest);
-  void ArgumentsLength(bool is_rest);
+  void ArgumentsElements(CreateArgumentsType type);
+  void ArgumentsLength(CreateArgumentsType type);
   void BeginCapturedObject(int length);
   void DuplicateObject(int object_index);
   void StoreRegister(Register reg);
@@ -974,7 +949,7 @@ class MaterializedObjectStore {
   int StackIdToIndex(Address fp);
 
   Isolate* isolate_;
-  List<Address> frame_fps_;
+  std::vector<Address> frame_fps_;
 };
 
 

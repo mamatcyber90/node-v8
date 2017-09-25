@@ -15,9 +15,8 @@ var GetIterator;
 var GetMethod;
 var GlobalArray = global.Array;
 var InternalArray = utils.InternalArray;
-var InternalPackedArray = utils.InternalPackedArray;
-var MaxSimple;
-var MinSimple;
+var MathMax = global.Math.max;
+var MathMin = global.Math.min;
 var ObjectHasOwnProperty = global.Object.prototype.hasOwnProperty;
 var ObjectToString = global.Object.prototype.toString;
 var iteratorSymbol = utils.ImportNow("iterator_symbol");
@@ -26,8 +25,6 @@ var unscopablesSymbol = utils.ImportNow("unscopables_symbol");
 utils.Import(function(from) {
   GetIterator = from.GetIterator;
   GetMethod = from.GetMethod;
-  MaxSimple = from.MaxSimple;
-  MinSimple = from.MinSimple;
 });
 
 // -------------------------------------------------------------------
@@ -227,7 +224,7 @@ function SparseMove(array, start_i, del_count, len, num_additional_args) {
   // Move data to new array.
   var new_array = new InternalArray(
       // Clamp array length to 2^32-1 to avoid early RangeError.
-      MinSimple(len - del_count + num_additional_args, 0xffffffff));
+      MathMin(len - del_count + num_additional_args, 0xffffffff));
   var big_indices;
   var indices = %GetArrayKeys(array, len);
   if (IS_NUMBER(indices)) {
@@ -617,7 +614,7 @@ function ArraySliceFallback(start, end) {
     if (end_i > len) end_i = len;
   }
 
-  var result = ArraySpeciesCreate(array, MaxSimple(end_i - start_i, 0));
+  var result = ArraySpeciesCreate(array, MathMax(end_i - start_i, 0));
 
   if (end_i < start_i) return result;
 
@@ -953,7 +950,7 @@ function InnerArraySort(array, length, comparefn) {
       obj[i] = UNDEFINED;
     }
     for (i = length - num_holes; i < length; i++) {
-      // For compatability with Webkit, do not expose elements in the prototype.
+      // For compatibility with Webkit, do not expose elements in the prototype.
       if (i in %object_get_prototype_of(obj)) {
         obj[i] = UNDEFINED;
       } else {
@@ -1007,6 +1004,10 @@ DEFINE_METHOD(
   GlobalArray.prototype,
   sort(comparefn) {
     CHECK_OBJECT_COERCIBLE(this, "Array.prototype.sort");
+
+    if (!IS_UNDEFINED(comparefn) && !IS_CALLABLE(comparefn)) {
+      throw %make_type_error(kBadSortComparisonFunction, comparefn);
+    }
 
     var array = TO_OBJECT(this);
     var length = TO_LENGTH(array.length);
@@ -1086,28 +1087,28 @@ DEFINE_METHOD_LEN(
     target = TO_INTEGER(target);
     var to;
     if (target < 0) {
-      to = MaxSimple(length + target, 0);
+      to = MathMax(length + target, 0);
     } else {
-      to = MinSimple(target, length);
+      to = MathMin(target, length);
     }
 
     start = TO_INTEGER(start);
     var from;
     if (start < 0) {
-      from = MaxSimple(length + start, 0);
+      from = MathMax(length + start, 0);
     } else {
-      from = MinSimple(start, length);
+      from = MathMin(start, length);
     }
 
     end = IS_UNDEFINED(end) ? length : TO_INTEGER(end);
     var final;
     if (end < 0) {
-      final = MaxSimple(length + end, 0);
+      final = MathMax(length + end, 0);
     } else {
-      final = MinSimple(end, length);
+      final = MathMin(end, length);
     }
 
-    var count = MinSimple(final - from, length - to);
+    var count = MathMin(final - from, length - to);
     var direction = 1;
     if (from < to && to < (from + count)) {
       direction = -1;
@@ -1353,13 +1354,6 @@ utils.SetUpLockedPrototype(InternalArray, GlobalArray(), [
   "shift", ArrayShift,
   "sort", ArraySort,
   "splice", ArraySplice
-]);
-
-utils.SetUpLockedPrototype(InternalPackedArray, GlobalArray(), [
-  "join", ArrayJoin,
-  "pop", ArrayPop,
-  "push", ArrayPush,
-  "shift", ArrayShift
 ]);
 
 // V8 extras get a separate copy of InternalPackedArray. We give them the basic

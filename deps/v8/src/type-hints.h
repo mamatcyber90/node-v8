@@ -15,10 +15,10 @@ namespace internal {
 enum class BinaryOperationHint : uint8_t {
   kNone,
   kSignedSmall,
+  kSignedSmallInputs,
   kSigned32,
   kNumber,
   kNumberOrOddball,
-  kNonEmptyString,
   kString,
   kAny
 };
@@ -47,6 +47,16 @@ inline size_t hash_value(CompareOperationHint hint) {
 }
 
 std::ostream& operator<<(std::ostream&, CompareOperationHint);
+
+// Type hints for for..in statements.
+enum class ForInHint : uint8_t {
+  kNone,
+  kEnumCacheKeysAndIndices,
+  kEnumCacheKeys,
+  kAny
+};
+
+std::ostream& operator<<(std::ostream&, ForInHint);
 
 // Type hints for the ToBoolean type conversion.
 enum class ToBooleanHint : uint16_t {

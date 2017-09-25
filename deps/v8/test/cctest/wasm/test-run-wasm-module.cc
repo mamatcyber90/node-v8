@@ -5,13 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "src/api.h"
 #include "src/objects-inl.h"
 #include "src/snapshot/code-serializer.h"
 #include "src/version.h"
 #include "src/wasm/module-decoder.h"
 #include "src/wasm/wasm-module-builder.h"
 #include "src/wasm/wasm-module.h"
-#include "src/wasm/wasm-objects.h"
+#include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-opcodes.h"
 
 #include "test/cctest/cctest.h"
@@ -19,10 +20,9 @@
 #include "test/common/wasm/wasm-macro-gen.h"
 #include "test/common/wasm/wasm-module-runner.h"
 
-using namespace v8::base;
-using namespace v8::internal;
-using namespace v8::internal::compiler;
-using namespace v8::internal::wasm;
+namespace v8 {
+namespace internal {
+namespace wasm {
 
 namespace {
 void Cleanup(Isolate* isolate = nullptr) {
@@ -287,7 +287,7 @@ class WasmSerializationTest {
         Handle<Object>(Smi::FromInt(41), current_isolate())};
     int32_t result = testing::CallWasmFunctionForTesting(
         current_isolate(), instance, &thrower, kFunctionName, 1, params);
-    CHECK(result == 42);
+    CHECK_EQ(42, result);
   }
 
   Isolate* current_isolate() {
@@ -452,7 +452,7 @@ TEST(ModuleBuilder) {
   size_t third = buffer.size() / 3;
   size_t first_mark = third - 2;
   size_t second_mark = buffer.size() - 2 - third;
-  CHECK(0 < first_mark);
+  CHECK_LT(0, first_mark);
   CHECK(first_mark < second_mark);
   CHECK(second_mark < buffer.size());
   Isolate* i_isolate = CcTest::InitIsolateOnce();
@@ -482,7 +482,7 @@ TEST(FailingModuleBuilder) {
   size_t third = buffer.size() / 3;
   size_t first_mark = third - 2;
   size_t second_mark = buffer.size() - 2 - third;
-  CHECK(0 < first_mark);
+  CHECK_LT(0, first_mark);
   CHECK(first_mark < second_mark);
   CHECK(second_mark < buffer.size());
   Isolate* i_isolate = CcTest::InitIsolateOnce();
@@ -795,7 +795,7 @@ TEST(Run_WasmModule_GrowMemOobFixedIndex) {
     Handle<Object> params[1] = {Handle<Object>(Smi::FromInt(1), isolate)};
     int32_t result =
         testing::RunWasmModuleForTesting(isolate, instance, 1, params);
-    CHECK(result == 0xaced);
+    CHECK_EQ(0xaced, result);
   }
   Cleanup();
 }
@@ -846,7 +846,7 @@ TEST(Run_WasmModule_GrowMemOobVariableIndex) {
           Handle<Object>(Smi::FromInt((20 + i) * kPageSize - 4), isolate)};
       int32_t result =
           testing::RunWasmModuleForTesting(isolate, instance, 1, params);
-      CHECK(result == 0xaced);
+      CHECK_EQ(0xaced, result);
     }
 
     v8::TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
@@ -1105,7 +1105,13 @@ TEST(Run_WasmModule_Buffer_Externalized_GrowMem) {
     v8::Utils::ToLocal(memory)->Externalize();
 
     uint32_t result = WasmMemoryObject::Grow(isolate, mem_obj, 4);
-    const bool free_memory = true;
+    bool free_memory = !memory->has_guard_region();
+    if (!free_memory) {
+      // current_pages = Initial memory size(16) + GrowWebAssemblyMemory(4)
+      const uint32_t current_pages = 20;
+      i::WasmMemoryObject::SetupNewBufferWithSameBackingStore(isolate, mem_obj,
+                                                              current_pages);
+    }
     wasm::DetachWebAssemblyMemoryBuffer(isolate, memory, free_memory);
     CHECK_EQ(16, result);
     memory = handle(mem_obj->array_buffer());
@@ -1122,8 +1128,12 @@ TEST(Run_WasmModule_Buffer_Externalized_GrowMem) {
     isolate->array_buffer_allocator()->Free(memory->allocation_base(),
                                             memory->allocation_length(),
                                             allocation_mode);
-    isolate->array_buffer_allocator()->Free(
-        old_allocation_base, old_allocation_length, allocation_mode);
+    if (free_memory) {
+      // GrowMemory without guard pages enabled allocates an extra buffer,
+      // that needs to be freed as well
+      isolate->array_buffer_allocator()->Free(
+          old_allocation_base, old_allocation_length, allocation_mode);
+    }
     memory->set_allocation_base(nullptr);
     memory->set_allocation_length(0);
   }
@@ -1170,3 +1180,9 @@ TEST(Run_WasmModule_Buffer_Externalized_Detach) {
   }
   Cleanup();
 }
+
+#undef EMIT_CODE_WITH_END
+
+}  // namespace wasm
+}  // namespace internal
+}  // namespace v8

@@ -11,6 +11,7 @@
 #include "src/codegen.h"
 #include "src/globals.h"
 #include "src/interface-descriptors.h"
+#include "src/parsing/token.h"
 
 namespace v8 {
 namespace internal {
@@ -28,30 +29,16 @@ class V8_EXPORT_PRIVATE CodeFactory final {
   static Callable LoadGlobalIC(Isolate* isolate, TypeofMode typeof_mode);
   static Callable LoadGlobalICInOptimizedCode(Isolate* isolate,
                                               TypeofMode typeof_mode);
-  static Callable CallIC(Isolate* isolate,
-                         ConvertReceiverMode mode = ConvertReceiverMode::kAny);
-  static Callable CallICTrampoline(
-      Isolate* isolate, ConvertReceiverMode mode = ConvertReceiverMode::kAny);
   static Callable StoreGlobalIC(Isolate* isolate, LanguageMode mode);
   static Callable StoreGlobalICInOptimizedCode(Isolate* isolate,
                                                LanguageMode mode);
-  static Callable StoreIC(Isolate* isolate, LanguageMode mode);
-  static Callable StoreICInOptimizedCode(Isolate* isolate, LanguageMode mode);
-  static Callable StoreIC_Uninitialized(Isolate* isolate, LanguageMode mode);
   static Callable StoreOwnIC(Isolate* isolate);
   static Callable StoreOwnICInOptimizedCode(Isolate* isolate);
-  static Callable KeyedStoreIC(Isolate* isolate, LanguageMode mode);
-  static Callable KeyedStoreICInOptimizedCode(Isolate* isolate,
-                                              LanguageMode mode);
-  static Callable KeyedStoreIC_Megamorphic(Isolate* isolate, LanguageMode mode);
 
   static Callable ResumeGenerator(Isolate* isolate);
 
   static Callable FrameDropperTrampoline(Isolate* isolate);
   static Callable HandleDebuggerStatement(Isolate* isolate);
-
-  static Callable CompareIC(Isolate* isolate, Token::Value op);
-  static Callable CompareNilIC(Isolate* isolate, NilValue nil_value);
 
   static Callable BinaryOperation(Isolate* isolate, Token::Value op);
 
@@ -103,7 +90,6 @@ class V8_EXPORT_PRIVATE CodeFactory final {
                                               InterpreterPushArgsMode mode);
   static Callable InterpreterPushArgsThenConstruct(
       Isolate* isolate, InterpreterPushArgsMode mode);
-  static Callable InterpreterPushArgsThenConstructArray(Isolate* isolate);
   static Callable InterpreterCEntry(Isolate* isolate, int result_size = 1);
   static Callable InterpreterOnStackReplacement(Isolate* isolate);
 

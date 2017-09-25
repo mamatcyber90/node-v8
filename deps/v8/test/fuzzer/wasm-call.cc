@@ -18,12 +18,13 @@
 #include "test/fuzzer/fuzzer-support.h"
 #include "test/fuzzer/wasm-fuzzer-common.h"
 
-#define MAX_NUM_FUNCTIONS 3
-#define MAX_NUM_PARAMS 3
+namespace v8 {
+namespace internal {
+namespace wasm {
+namespace fuzzer {
 
-using namespace v8::internal;
-using namespace v8::internal::wasm;
-using namespace v8::internal::wasm::fuzzer;
+static constexpr uint32_t kMaxNumFunctions = 3;
+static constexpr uint32_t kMaxNumParams = 3;
 
 class WasmCallFuzzer : public WasmExecutionFuzzer {
   template <typename V>
@@ -32,17 +33,16 @@ class WasmCallFuzzer : public WasmExecutionFuzzer {
     // that a value of type V can be read without problems.
     *ok &= (*size > sizeof(V));
     if (!(*ok)) return 0;
-    V result = v8::internal::ReadLittleEndianValue<V>(*data);
+    V result = ReadLittleEndianValue<V>(*data);
     *data += sizeof(V);
     *size -= sizeof(V);
     return result;
   }
 
-  static void add_argument(
-      v8::internal::Isolate* isolate, ValueType type,
-      WasmValue* interpreter_args,
-      v8::internal::Handle<v8::internal::Object>* compiler_args, int* argc,
-      const uint8_t** data, size_t* size, bool* ok) {
+  static void add_argument(Isolate* isolate, ValueType type,
+                           WasmValue* interpreter_args,
+                           Handle<Object>* compiler_args, int* argc,
+                           const uint8_t** data, size_t* size, bool* ok) {
     if (!(*ok)) return;
     switch (type) {
       case kWasmF32: {
@@ -71,14 +71,14 @@ class WasmCallFuzzer : public WasmExecutionFuzzer {
     (*argc)++;
   }
 
-  virtual bool GenerateModule(
+  bool GenerateModule(
       Isolate* isolate, Zone* zone, const uint8_t* data, size_t size,
       ZoneBuffer& buffer, int32_t& num_args,
       std::unique_ptr<WasmValue[]>& interpreter_args,
       std::unique_ptr<Handle<Object>[]>& compiler_args) override {
     bool ok = true;
     uint8_t num_functions =
-        (read_value<uint8_t>(&data, &size, &ok) % MAX_NUM_FUNCTIONS) + 1;
+        (read_value<uint8_t>(&data, &size, &ok) % kMaxNumFunctions) + 1;
 
     ValueType types[] = {kWasmF32, kWasmF64, kWasmI32, kWasmI64};
 
@@ -88,7 +88,7 @@ class WasmCallFuzzer : public WasmExecutionFuzzer {
     WasmModuleBuilder builder(zone);
     for (int fun = 0; fun < num_functions; fun++) {
       size_t num_params = static_cast<size_t>(
-          (read_value<uint8_t>(&data, &size, &ok) % MAX_NUM_PARAMS) + 1);
+          (read_value<uint8_t>(&data, &size, &ok) % kMaxNumParams) + 1);
       FunctionSig::Builder sig_builder(zone, 1, num_params);
       sig_builder.AddReturn(kWasmI32);
       for (size_t param = 0; param < num_params; param++) {
@@ -101,8 +101,7 @@ class WasmCallFuzzer : public WasmExecutionFuzzer {
                        compiler_args.get(), &num_args, &data, &size, &ok);
         }
       }
-      v8::internal::wasm::WasmFunctionBuilder* f =
-          builder.AddFunction(sig_builder.Build());
+      WasmFunctionBuilder* f = builder.AddFunction(sig_builder.Build());
       uint32_t code_size = static_cast<uint32_t>(size / num_functions);
       f->EmitCode(data, code_size);
       uint8_t end_opcode = kExprEnd;
@@ -110,10 +109,11 @@ class WasmCallFuzzer : public WasmExecutionFuzzer {
       data += code_size;
       size -= code_size;
       if (fun == 0) {
-        builder.AddExport(v8::internal::CStrVector("main"), f);
+        builder.AddExport(CStrVector("main"), f);
       }
     }
 
+    builder.SetMaxMemorySize(32);
     builder.WriteTo(buffer);
 
     if (!ok) {
@@ -127,3 +127,8 @@ class WasmCallFuzzer : public WasmExecutionFuzzer {
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   return WasmCallFuzzer().FuzzWasmModule(data, size);
 }
+
+}  // namespace fuzzer
+}  // namespace wasm
+}  // namespace internal
+}  // namespace v8

@@ -95,9 +95,9 @@ class MyRandomNumberGenerator {
   uint32_t i;
 };
 
-
-using namespace v8::internal;
-
+namespace v8 {
+namespace internal {
+namespace test_strings {
 
 static const int DEEP_DEPTH = 8 * 1024;
 static const int SUPER_DEEP_DEPTH = 80 * 1024;
@@ -1100,7 +1100,8 @@ TEST(JSONStringifySliceMadeExternal) {
 
   CHECK_EQ(0,
            strcmp("\"bcdefghijklmnopqrstuvwxyz\"",
-                  *v8::String::Utf8Value(CompileRun("JSON.stringify(slice)"))));
+                  *v8::String::Utf8Value(CcTest::isolate(),
+                                         CompileRun("JSON.stringify(slice)"))));
 }
 
 
@@ -1505,27 +1506,28 @@ static void CheckCanonicalEquivalence(uint16_t c, uint16_t test) {
 
 
 TEST(Latin1IgnoreCase) {
-  using namespace unibrow;
-  for (uint16_t c = Latin1::kMaxChar + 1; c != 0; c++) {
-    uint16_t lower = ConvertLatin1<ToLowercase, false>(c);
-    uint16_t upper = ConvertLatin1<ToUppercase, false>(c);
-    uint16_t test = Latin1::ConvertNonLatin1ToLatin1(c);
+  for (uint16_t c = unibrow::Latin1::kMaxChar + 1; c != 0; c++) {
+    uint16_t lower = ConvertLatin1<unibrow::ToLowercase, false>(c);
+    uint16_t upper = ConvertLatin1<unibrow::ToUppercase, false>(c);
+    uint16_t test = unibrow::Latin1::ConvertNonLatin1ToLatin1(c);
     // Filter out all character whose upper is not their lower or vice versa.
     if (lower == 0 && upper == 0) {
       CheckCanonicalEquivalence(c, test);
       continue;
     }
-    if (lower > Latin1::kMaxChar && upper > Latin1::kMaxChar) {
+    if (lower > unibrow::Latin1::kMaxChar &&
+        upper > unibrow::Latin1::kMaxChar) {
       CheckCanonicalEquivalence(c, test);
       continue;
     }
     if (lower == 0 && upper != 0) {
-      lower = ConvertLatin1<ToLowercase, false>(upper);
+      lower = ConvertLatin1<unibrow::ToLowercase, false>(upper);
     }
     if (upper == 0 && lower != c) {
-      upper = ConvertLatin1<ToUppercase, false>(lower);
+      upper = ConvertLatin1<unibrow::ToUppercase, false>(lower);
     }
-    if (lower > Latin1::kMaxChar && upper > Latin1::kMaxChar) {
+    if (lower > unibrow::Latin1::kMaxChar &&
+        upper > unibrow::Latin1::kMaxChar) {
       CheckCanonicalEquivalence(c, test);
       continue;
     }
@@ -1667,3 +1669,7 @@ TEST(ExternalStringIndexOf) {
                    ->Int32Value(context.local())
                    .FromJust());
 }
+
+}  // namespace test_strings
+}  // namespace internal
+}  // namespace v8

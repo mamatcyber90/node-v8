@@ -9,6 +9,7 @@
 #include "src/counters.h"
 #include "src/objects-inl.h"
 #include "src/regexp/jsregexp-inl.h"
+#include "src/regexp/regexp-utils.h"
 #include "src/string-builder.h"
 #include "src/string-search.h"
 
@@ -44,8 +45,6 @@ RUNTIME_FUNCTION(Runtime_GetSubstitution) {
     MaybeHandle<String> GetNamedCapture(Handle<String> name,
                                         CaptureState* state) override {
       UNREACHABLE();
-      *state = INVALID;
-      return MaybeHandle<String>();
     }
 
    private:
@@ -136,6 +135,58 @@ RUNTIME_FUNCTION(Runtime_StringReplaceOneCharWithString) {
   return isolate->StackOverflow();
 }
 
+RUNTIME_FUNCTION(Runtime_StringTrim) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  Handle<String> string = args.at<String>(0);
+  CONVERT_SMI_ARG_CHECKED(mode, 1);
+  String::TrimMode trim_mode = static_cast<String::TrimMode>(mode);
+  return *String::Trim(string, trim_mode);
+}
+
+// ES6 #sec-string.prototype.includes
+// String.prototype.includes(searchString [, position])
+RUNTIME_FUNCTION(Runtime_StringIncludes) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(3, args.length());
+
+  Handle<Object> receiver = args.at(0);
+  if (receiver->IsNullOrUndefined(isolate)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewTypeError(MessageTemplate::kCalledOnNullOrUndefined,
+                              isolate->factory()->NewStringFromAsciiChecked(
+                                  "String.prototype.includes")));
+  }
+  Handle<String> receiver_string;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver_string,
+                                     Object::ToString(isolate, receiver));
+
+  // Check if the search string is a regExp and fail if it is.
+  Handle<Object> search = args.at(1);
+  Maybe<bool> is_reg_exp = RegExpUtils::IsRegExp(isolate, search);
+  if (is_reg_exp.IsNothing()) {
+    DCHECK(isolate->has_pending_exception());
+    return isolate->heap()->exception();
+  }
+  if (is_reg_exp.FromJust()) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewTypeError(MessageTemplate::kFirstArgumentNotRegExp,
+                              isolate->factory()->NewStringFromStaticChars(
+                                  "String.prototype.includes")));
+  }
+  Handle<String> search_string;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, search_string,
+                                     Object::ToString(isolate, args.at(1)));
+  Handle<Object> position;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, position,
+                                     Object::ToInteger(isolate, args.at(2)));
+
+  uint32_t index = receiver_string->ToValidIndex(*position);
+  int index_in_str =
+      String::IndexOf(isolate, receiver_string, search_string, index);
+  return *isolate->factory()->ToBoolean(index_in_str != -1);
+}
+
 // ES6 #sec-string.prototype.indexof
 // String.prototype.indexOf(searchString [, position])
 RUNTIME_FUNCTION(Runtime_StringIndexOf) {
@@ -206,22 +257,6 @@ RUNTIME_FUNCTION(Runtime_StringAdd) {
                            isolate->factory()->NewConsString(str1, str2));
 }
 
-RUNTIME_FUNCTION(Runtime_StringConcat) {
-  HandleScope scope(isolate);
-  DCHECK_LE(2, args.length());
-  int const argc = args.length();
-  ScopedVector<Handle<Object>> argv(argc);
-
-  isolate->counters()->string_add_runtime()->Increment();
-  IncrementalStringBuilder builder(isolate);
-  for (int i = 0; i < argc; ++i) {
-    Handle<String> str = Handle<String>::cast(args.at(i));
-    if (str->length() != 0) {
-      builder.AppendString(str);
-    }
-  }
-  RETURN_RESULT_OR_FAILURE(isolate, builder.Finish());
-}
 
 RUNTIME_FUNCTION(Runtime_InternalizeString) {
   HandleScope handles(isolate);
@@ -230,7 +265,7 @@ RUNTIME_FUNCTION(Runtime_InternalizeString) {
   return *isolate->factory()->InternalizeString(string);
 }
 
-RUNTIME_FUNCTION(Runtime_StringCharCodeAtRT) {
+RUNTIME_FUNCTION(Runtime_StringCharCodeAt) {
   HandleScope handle_scope(isolate);
   DCHECK_EQ(2, args.length());
 
@@ -743,21 +778,9 @@ RUNTIME_FUNCTION(Runtime_StringCharFromCode) {
   return isolate->heap()->empty_string();
 }
 
-RUNTIME_FUNCTION(Runtime_ExternalStringGetChar) {
+RUNTIME_FUNCTION(Runtime_StringMaxLength) {
   SealHandleScope shs(isolate);
-  DCHECK_EQ(2, args.length());
-  CONVERT_ARG_CHECKED(ExternalString, string, 0);
-  CONVERT_INT32_ARG_CHECKED(index, 1);
-  return Smi::FromInt(string->Get(index));
-}
-
-RUNTIME_FUNCTION(Runtime_StringCharCodeAt) {
-  SealHandleScope shs(isolate);
-  DCHECK_EQ(2, args.length());
-  if (!args[0]->IsString()) return isolate->heap()->undefined_value();
-  if (!args[1]->IsNumber()) return isolate->heap()->undefined_value();
-  if (std::isinf(args.number_at(1))) return isolate->heap()->nan_value();
-  return __RT_impl_Runtime_StringCharCodeAtRT(args, isolate);
+  return Smi::FromInt(String::kMaxLength);
 }
 
 }  // namespace internal

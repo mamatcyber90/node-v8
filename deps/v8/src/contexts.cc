@@ -199,7 +199,8 @@ static PropertyAttributes GetAttributesForMode(VariableMode mode) {
 Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
                                int* index, PropertyAttributes* attributes,
                                InitializationFlag* init_flag,
-                               VariableMode* variable_mode) {
+                               VariableMode* variable_mode,
+                               bool* is_sloppy_function_name) {
   Isolate* isolate = GetIsolate();
   Handle<Context> context(this, isolate);
 
@@ -209,6 +210,9 @@ Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
   *attributes = ABSENT;
   *init_flag = kCreatedInitialized;
   *variable_mode = VAR;
+  if (is_sloppy_function_name != nullptr) {
+    *is_sloppy_function_name = false;
+  }
 
   if (FLAG_trace_contexts) {
     PrintF("Context::Lookup(");
@@ -343,6 +347,10 @@ Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
           *attributes = READ_ONLY;
           *init_flag = kCreatedInitialized;
           *variable_mode = CONST;
+          if (is_sloppy_function_name != nullptr &&
+              is_sloppy(scope_info->language_mode())) {
+            *is_sloppy_function_name = true;
+          }
           return context;
         }
       }
@@ -432,77 +440,6 @@ Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
     PrintF("=> no property/slot found\n");
   }
   return Handle<Object>::null();
-}
-
-void Context::AddOptimizedFunction(JSFunction* function) {
-  DCHECK(IsNativeContext());
-#ifdef ENABLE_SLOW_DCHECKS
-  Isolate* isolate = GetIsolate();
-  if (FLAG_enable_slow_asserts) {
-    Object* element = get(OPTIMIZED_FUNCTIONS_LIST);
-    while (!element->IsUndefined(isolate)) {
-      CHECK(element != function);
-      element = JSFunction::cast(element)->next_function_link();
-    }
-  }
-
-  // Check that the context belongs to the weak native contexts list.
-  bool found = false;
-  Object* context = isolate->heap()->native_contexts_list();
-  while (!context->IsUndefined(isolate)) {
-    if (context == this) {
-      found = true;
-      break;
-    }
-    context = Context::cast(context)->next_context_link();
-  }
-  CHECK(found);
-#endif
-
-  DCHECK(function->next_function_link()->IsUndefined(GetIsolate()));
-  function->set_next_function_link(get(OPTIMIZED_FUNCTIONS_LIST),
-                                   UPDATE_WEAK_WRITE_BARRIER);
-  set(OPTIMIZED_FUNCTIONS_LIST, function, UPDATE_WEAK_WRITE_BARRIER);
-}
-
-
-void Context::RemoveOptimizedFunction(JSFunction* function) {
-  DCHECK(IsNativeContext());
-  Object* element = get(OPTIMIZED_FUNCTIONS_LIST);
-  JSFunction* prev = NULL;
-  Isolate* isolate = function->GetIsolate();
-  while (!element->IsUndefined(isolate)) {
-    JSFunction* element_function = JSFunction::cast(element);
-    DCHECK(element_function->next_function_link()->IsUndefined(isolate) ||
-           element_function->next_function_link()->IsJSFunction());
-    if (element_function == function) {
-      if (prev == NULL) {
-        set(OPTIMIZED_FUNCTIONS_LIST, element_function->next_function_link(),
-            UPDATE_WEAK_WRITE_BARRIER);
-      } else {
-        prev->set_next_function_link(element_function->next_function_link(),
-                                     UPDATE_WEAK_WRITE_BARRIER);
-      }
-      element_function->set_next_function_link(GetHeap()->undefined_value(),
-                                               UPDATE_WEAK_WRITE_BARRIER);
-      return;
-    }
-    prev = element_function;
-    element = element_function->next_function_link();
-  }
-  UNREACHABLE();
-}
-
-
-void Context::SetOptimizedFunctionsListHead(Object* head) {
-  DCHECK(IsNativeContext());
-  set(OPTIMIZED_FUNCTIONS_LIST, head, UPDATE_WEAK_WRITE_BARRIER);
-}
-
-
-Object* Context::OptimizedFunctionsListHead() {
-  DCHECK(IsNativeContext());
-  return get(OPTIMIZED_FUNCTIONS_LIST);
 }
 
 

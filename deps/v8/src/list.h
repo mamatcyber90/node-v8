@@ -146,7 +146,7 @@ class List {
   // Halve the capacity if fill level is less than a quarter.
   INLINE(void Trim(AllocationPolicy allocator = AllocationPolicy()));
 
-  bool Contains(const T& elm) const;
+  inline bool Contains(const T& elm) const;
   int CountOccurrences(const T& elm, int start, int end) const;
 
   // Iterate through all list entries, starting at index 0.
@@ -199,23 +199,6 @@ class List {
 
   DISALLOW_COPY_AND_ASSIGN(List);
 };
-
-
-template<typename T, class P>
-size_t GetMemoryUsedByList(const List<T, P>& list) {
-  return list.length() * sizeof(T) + sizeof(list);
-}
-
-
-class Map;
-class FieldType;
-class Code;
-template<typename T> class Handle;
-typedef List<Map*> MapList;
-typedef List<Code*> CodeList;
-typedef List<Handle<Map> > MapHandleList;
-typedef List<Handle<FieldType> > TypeHandleList;
-typedef List<Handle<Code> > CodeHandleList;
 
 }  // namespace internal
 }  // namespace v8

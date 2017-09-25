@@ -722,29 +722,6 @@ MaybeHandle<JSArray> LiveEdit::GatherCompileInfo(Handle<Script> script,
   }
 }
 
-// Finds all references to original and replaces them with substitution.
-static void ReplaceCodeObject(Handle<Code> original,
-                              Handle<Code> substitution) {
-  // Perform a full GC in order to ensure that we are not in the middle of an
-  // incremental marking phase when we are replacing the code object.
-  // Since we are not in an incremental marking phase we can write pointers
-  // to code objects (that are never in new space) without worrying about
-  // write barriers.
-  Heap* heap = original->GetHeap();
-  HeapIterator iterator(heap, HeapIterator::kFilterUnreachable);
-  // Now iterate over all pointers of all objects, including code_target
-  // implicit pointers.
-  for (HeapObject* obj = iterator.next(); obj != NULL; obj = iterator.next()) {
-    if (obj->IsJSFunction()) {
-      JSFunction* fun = JSFunction::cast(obj);
-      if (fun->code() == *original) fun->ReplaceCode(*substitution);
-    } else if (obj->IsSharedFunctionInfo()) {
-      SharedFunctionInfo* info = SharedFunctionInfo::cast(obj);
-      if (info->code() == *original) info->set_code(*substitution);
-    }
-  }
-}
-
 // Patch function feedback vector.
 // The feedback vector is a cache for complex object boilerplates and for a
 // native context. We must clean cached values, or if the structure of the
@@ -828,38 +805,49 @@ class FeedbackVectorFixer {
   };
 };
 
-
-// Marks code that shares the same shared function info or has inlined
-// code that shares the same function info.
-class DependentFunctionMarker: public OptimizedFunctionVisitor {
- public:
-  SharedFunctionInfo* shared_info_;
-  bool found_;
-
-  explicit DependentFunctionMarker(SharedFunctionInfo* shared_info)
-    : shared_info_(shared_info), found_(false) { }
-
-  virtual void VisitFunction(JSFunction* function) {
-    // It should be guaranteed by the iterator that everything is optimized.
-    DCHECK(function->code()->kind() == Code::OPTIMIZED_FUNCTION);
-    if (function->Inlines(shared_info_)) {
-      // Mark the code for deoptimization.
-      function->code()->set_marked_for_deoptimization(true);
-      found_ = true;
+namespace {
+bool NeedsDeoptimization(SharedFunctionInfo* function_info, Code* code) {
+  DeoptimizationInputData* table =
+      DeoptimizationInputData::cast(code->deoptimization_data());
+  SharedFunctionInfo* sfi =
+      SharedFunctionInfo::cast(table->SharedFunctionInfo());
+  if (sfi == function_info) return true;
+  DCHECK(code->kind() == Code::OPTIMIZED_FUNCTION);
+  DCHECK(table->length() != 0);
+  FixedArray* const literals = table->LiteralArray();
+  int const inlined_count = table->InlinedFunctionCount()->value();
+  for (int i = 0; i < inlined_count; i++) {
+    if (SharedFunctionInfo::cast(literals->get(i)) == function_info) {
+      return true;
     }
   }
-};
-
+  return false;
+}
+}  // namespace
 
 static void DeoptimizeDependentFunctions(SharedFunctionInfo* function_info) {
   DisallowHeapAllocation no_allocation;
-  DependentFunctionMarker marker(function_info);
-  // TODO(titzer): need to traverse all optimized code to find OSR code here.
-  Deoptimizer::VisitAllOptimizedFunctions(function_info->GetIsolate(), &marker);
+  bool found_something = false;
+  Isolate* isolate = function_info->GetIsolate();
+  Object* context_link = isolate->heap()->native_contexts_list();
+  while (!context_link->IsUndefined(isolate)) {
+    Context* context = Context::cast(context_link);
+    Object* element = context->OptimizedCodeListHead();
+    while (!element->IsUndefined(isolate)) {
+      Code* code = Code::cast(element);
+      DCHECK(code->kind() == Code::OPTIMIZED_FUNCTION);
+      if (NeedsDeoptimization(function_info, code)) {
+        code->set_marked_for_deoptimization(true);
+        found_something = true;
+      }
+      element = code->next_code_link();
+    }
+    context_link = context->next_context_link();
+  }
 
-  if (marker.found_) {
+  if (found_something) {
     // Only go through with the deoptimization if something was found.
-    Deoptimizer::DeoptimizeMarkedCode(function_info->GetIsolate());
+    Deoptimizer::DeoptimizeMarkedCode(isolate);
   }
 }
 
@@ -885,30 +873,7 @@ void LiveEdit::ReplaceFunctionCode(
     // Clear old bytecode. This will trigger self-healing if we do not install
     // new bytecode.
     shared_info->ClearBytecodeArray();
-    if (!shared_info->HasBaselineCode()) {
-      // Every function from this SFI is interpreted.
-      if (!new_shared_info->HasBaselineCode()) {
-        // We have newly compiled bytecode. Simply replace the old one.
-        shared_info->set_bytecode_array(new_shared_info->bytecode_array());
-      } else {
-        // Rely on self-healing for places that used to run bytecode.
-        shared_info->ReplaceCode(*new_code);
-      }
-    } else {
-      // Functions from this SFI can be either interpreted or running FCG.
-      DCHECK(old_code->kind() == Code::FUNCTION);
-      if (new_shared_info->HasBytecodeArray()) {
-        // Start using new bytecode everywhere.
-        shared_info->set_bytecode_array(new_shared_info->bytecode_array());
-        ReplaceCodeObject(old_code,
-                          isolate->builtins()->InterpreterEntryTrampoline());
-      } else {
-        // Start using new FCG code everywhere.
-        // Rely on self-healing for places that used to run bytecode.
-        DCHECK(new_code->kind() == Code::FUNCTION);
-        ReplaceCodeObject(old_code, new_code);
-      }
-    }
+    shared_info->set_bytecode_array(new_shared_info->bytecode_array());
 
     if (shared_info->HasBreakInfo()) {
       // Existing break points will be re-applied. Reset the debug info here.
@@ -1066,11 +1031,6 @@ void LiveEdit::PatchFunctionPositions(Handle<JSArray> shared_info_array,
   if (info->HasBytecodeArray()) {
     TranslateSourcePositionTable(
         Handle<AbstractCode>(AbstractCode::cast(info->bytecode_array())),
-        position_change_array);
-  }
-  if (info->code()->kind() == Code::FUNCTION) {
-    TranslateSourcePositionTable(
-        Handle<AbstractCode>(AbstractCode::cast(info->code())),
         position_change_array);
   }
   if (info->HasBreakInfo()) {

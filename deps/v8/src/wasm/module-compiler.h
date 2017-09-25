@@ -13,6 +13,8 @@
 #include "src/compiler/wasm-compiler.h"
 #include "src/isolate.h"
 
+#include "src/wasm/module-decoder.h"
+#include "src/wasm/streaming-decoder.h"
 #include "src/wasm/wasm-code-specialization.h"
 #include "src/wasm/wasm-objects.h"
 
@@ -23,17 +25,14 @@ namespace wasm {
 // A class compiling an entire module.
 class ModuleCompiler {
  public:
-  // The ModuleCompiler takes ownership of the {WasmModule}.
-  // In {CompileToModuleObject}, it will transfer ownership to the generated
-  // {WasmModuleWrapper}. If this method is not called, ownership may be
-  // reclaimed by explicitely releasing the {module_} field.
-  ModuleCompiler(Isolate* isolate, std::unique_ptr<WasmModule> module);
+  ModuleCompiler(Isolate* isolate, WasmModule* module,
+                 Handle<Code> centry_stub);
 
   // The actual runnable task that performs compilations in the background.
   class CompilationTask : public CancelableTask {
    public:
     ModuleCompiler* compiler_;
-    explicit CompilationTask(ModuleCompiler* helper);
+    explicit CompilationTask(ModuleCompiler*);
 
     void RunInternal() override;
   };
@@ -48,7 +47,7 @@ class ModuleCompiler {
 
     ~CompilationUnitBuilder() { DCHECK(units_.empty()); }
 
-    void AddUnit(ModuleEnv* module_env, const WasmFunction* function,
+    void AddUnit(compiler::ModuleEnv* module_env, const WasmFunction* function,
                  uint32_t buffer_offset, Vector<const uint8_t> bytes,
                  WasmName name) {
       units_.emplace_back(new compiler::WasmCompilationUnit(
@@ -56,7 +55,7 @@ class ModuleCompiler {
           wasm::FunctionBody{function->sig, buffer_offset, bytes.begin(),
                              bytes.end()},
           name, function->func_index, compiler_->centry_stub_,
-          compiler_->async_counters()));
+          compiler_->counters()));
     }
 
     void Commit() {
@@ -70,6 +69,8 @@ class ModuleCompiler {
       }
       units_.clear();
     }
+
+    void Clear() { units_.clear(); }
 
    private:
     ModuleCompiler* compiler_;
@@ -104,10 +105,7 @@ class ModuleCompiler {
     base::AtomicNumber<size_t> allocated_memory_{0};
   };
 
-  const std::shared_ptr<Counters>& async_counters() const {
-    return async_counters_;
-  }
-  Counters* counters() const { return async_counters().get(); }
+  Counters* counters() const { return async_counters_.get(); }
 
   // Run by each compilation task and by the main thread (i.e. in both
   // foreground and background threads). The no_finisher_callback is called
@@ -127,47 +125,49 @@ class ModuleCompiler {
   }
 
   size_t InitializeCompilationUnits(const std::vector<WasmFunction>& functions,
-                                    ModuleBytesEnv& module_env);
-
-  void ReopenHandlesInDeferredScope();
+                                    const ModuleWireBytes& wire_bytes,
+                                    compiler::ModuleEnv* module_env);
 
   void RestartCompilationTasks();
 
   size_t FinishCompilationUnits(std::vector<Handle<Code>>& results,
                                 ErrorThrower* thrower);
 
+  bool IsFinisherRunning() const { return finisher_is_running_; }
+
   void SetFinisherIsRunning(bool value);
 
   MaybeHandle<Code> FinishCompilationUnit(ErrorThrower* thrower,
                                           int* func_index);
 
-  void CompileInParallel(ModuleBytesEnv* module_env,
+  void CompileInParallel(const ModuleWireBytes& wire_bytes,
+                         compiler::ModuleEnv* module_env,
                          std::vector<Handle<Code>>& results,
                          ErrorThrower* thrower);
 
-  void CompileSequentially(ModuleBytesEnv* module_env,
+  void CompileSequentially(const ModuleWireBytes& wire_bytes,
+                           compiler::ModuleEnv* module_env,
                            std::vector<Handle<Code>>& results,
                            ErrorThrower* thrower);
 
-  void ValidateSequentially(ModuleBytesEnv* module_env, ErrorThrower* thrower);
+  void ValidateSequentially(const ModuleWireBytes& wire_bytes,
+                            compiler::ModuleEnv* module_env,
+                            ErrorThrower* thrower);
 
-  MaybeHandle<WasmModuleObject> CompileToModuleObject(
-      ErrorThrower* thrower, const ModuleWireBytes& wire_bytes,
+  static MaybeHandle<WasmModuleObject> CompileToModuleObject(
+      Isolate* isolate, ErrorThrower* thrower,
+      std::unique_ptr<WasmModule> module, const ModuleWireBytes& wire_bytes,
       Handle<Script> asm_js_script,
       Vector<const byte> asm_js_offset_table_bytes);
 
-  std::unique_ptr<WasmModule> ReleaseModule() { return std::move(module_); }
-
  private:
   MaybeHandle<WasmModuleObject> CompileToModuleObjectInternal(
-      ErrorThrower* thrower, const ModuleWireBytes& wire_bytes,
-      Handle<Script> asm_js_script,
-      Vector<const byte> asm_js_offset_table_bytes, Factory* factory,
-      WasmInstance* temp_instance, Handle<FixedArray>* function_tables,
-      Handle<FixedArray>* signature_tables);
+      ErrorThrower* thrower, std::unique_ptr<WasmModule> module,
+      const ModuleWireBytes& wire_bytes, Handle<Script> asm_js_script,
+      Vector<const byte> asm_js_offset_table_bytes);
 
   Isolate* isolate_;
-  std::unique_ptr<WasmModule> module_;
+  WasmModule* module_;
   const std::shared_ptr<Counters> async_counters_;
   std::vector<std::unique_ptr<compiler::WasmCompilationUnit>>
       compilation_units_;
@@ -186,7 +186,7 @@ class ModuleCompiler {
 class JSToWasmWrapperCache {
  public:
   Handle<Code> CloneOrCompileJSToWasmWrapper(Isolate* isolate,
-                                             const wasm::WasmModule* module,
+                                             wasm::WasmModule* module,
                                              Handle<Code> wasm_code,
                                              uint32_t index);
 
@@ -219,6 +219,13 @@ class InstanceBuilder {
     Handle<FixedArray> signature_table;    // internal sig array
   };
 
+  // A pre-evaluated value to use in import binding.
+  struct SanitizedImport {
+    Handle<String> module_name;
+    Handle<String> import_name;
+    Handle<Object> value;
+  };
+
   Isolate* isolate_;
   WasmModule* const module_;
   const std::shared_ptr<Counters> async_counters_;
@@ -232,6 +239,7 @@ class InstanceBuilder {
   std::vector<Handle<JSFunction>> js_wrappers_;
   JSToWasmWrapperCache js_to_wasm_cache_;
   WeakCallbackInfo<void>::Callback instance_finalizer_callback_;
+  std::vector<SanitizedImport> sanitized_imports_;
 
   const std::shared_ptr<Counters>& async_counters() const {
     return async_counters_;
@@ -275,6 +283,11 @@ class InstanceBuilder {
 
   void WriteGlobalValue(WasmGlobal& global, Handle<Object> value);
 
+  void SanitizeImports();
+
+  Handle<FixedArray> SetupWasmToJSImportsTable(
+      Handle<WasmInstanceObject> instance);
+
   // Process the imports, including functions, tables, globals, and memory, in
   // order, loading them from the {ffi_} object. Returns the number of imported
   // functions.
@@ -288,14 +301,13 @@ class InstanceBuilder {
   void InitGlobals();
 
   // Allocate memory for a module instance as a new JSArrayBuffer.
-  Handle<JSArrayBuffer> AllocateMemory(uint32_t min_mem_pages);
+  Handle<JSArrayBuffer> AllocateMemory(uint32_t num_pages);
 
   bool NeedsWrappers() const;
 
   // Process the exports, creating wrappers for functions, tables, memories,
   // and globals.
-  void ProcessExports(Handle<FixedArray> code_table,
-                      Handle<WasmInstanceObject> instance,
+  void ProcessExports(Handle<WasmInstanceObject> instance,
                       Handle<WasmCompiledModule> compiled_module);
 
   void InitializeTables(Handle<WasmInstanceObject> instance,
@@ -320,6 +332,10 @@ class AsyncCompileJob {
 
   void Start();
 
+  std::shared_ptr<StreamingDecoder> CreateStreamingDecoder();
+
+  void Abort();
+
   ~AsyncCompileJob();
 
  private:
@@ -336,6 +352,41 @@ class AsyncCompileJob {
   class FinishCompile;
   class CompileWrappers;
   class FinishModule;
+  class AbortCompilation;
+
+  const std::shared_ptr<Counters>& async_counters() const {
+    return async_counters_;
+  }
+  Counters* counters() const { return async_counters().get(); }
+
+  void AsyncCompileFailed(ErrorThrower& thrower);
+
+  void AsyncCompileSucceeded(Handle<Object> result);
+
+  void StartForegroundTask();
+
+  void StartBackgroundTask();
+
+  void RestartBackgroundTasks();
+
+  // Switches to the compilation step {Step} and starts a foreground task to
+  // execute it.
+  template <typename Step, typename... Args>
+  void DoSync(Args&&... args);
+
+  // Switches to the compilation step {Step} and starts a background task to
+  // execute it.
+  template <typename Step, typename... Args>
+  void DoAsync(Args&&... args);
+
+  // Switches to the compilation step {Step} but does not start a task to
+  // execute it.
+  template <typename Step, typename... Args>
+  void NextStep(Args&&... args);
+
+  Isolate* isolate() { return isolate_; }
+
+  friend class AsyncStreamingProcessor;
 
   Isolate* isolate_;
   const std::shared_ptr<Counters> async_counters_;
@@ -344,43 +395,76 @@ class AsyncCompileJob {
   Handle<Context> context_;
   Handle<JSPromise> module_promise_;
   std::unique_ptr<ModuleCompiler> compiler_;
-  std::unique_ptr<ModuleBytesEnv> module_bytes_env_;
+  std::unique_ptr<compiler::ModuleEnv> module_env_;
+  std::unique_ptr<WasmModule> module_;
 
   std::vector<DeferredHandles*> deferred_handles_;
   Handle<WasmModuleObject> module_object_;
-  Handle<FixedArray> function_tables_;
-  Handle<FixedArray> signature_tables_;
   Handle<WasmCompiledModule> compiled_module_;
   Handle<FixedArray> code_table_;
-  std::unique_ptr<WasmInstance> temp_instance_ = nullptr;
+  Handle<FixedArray> export_wrappers_;
   size_t outstanding_units_ = 0;
   std::unique_ptr<CompileStep> step_;
   CancelableTaskManager background_task_manager_;
-#if DEBUG
+  // The number of background tasks which stopped executing within a step.
+  base::AtomicNumber<size_t> stopped_tasks_{0};
+
+  // For async compilation the AsyncCompileJob is the only finisher. For
+  // streaming compilation also the AsyncStreamingProcessor has to finish before
+  // compilation can be finished.
+  base::AtomicNumber<int32_t> outstanding_finishers_{1};
+
+  // Decrements the number of outstanding finishers. The last caller of this
+  // function should finish the asynchronous compilation, see the comment on
+  // {outstanding_finishers_}.
+  V8_WARN_UNUSED_RESULT bool DecrementAndCheckFinisherCount() {
+    return outstanding_finishers_.Decrement(1) == 0;
+  }
+
   // Counts the number of pending foreground tasks.
   int32_t num_pending_foreground_tasks_ = 0;
-#endif
 
-  const std::shared_ptr<Counters>& async_counters() const {
-    return async_counters_;
-  }
-  Counters* counters() const { return async_counters().get(); }
+  // The AsyncCompileJob owns the StreamingDecoder because the StreamingDecoder
+  // contains data which is needed by the AsyncCompileJob for streaming
+  // compilation. The AsyncCompileJob does not actively use the
+  // StreamingDecoder.
+  std::shared_ptr<StreamingDecoder> stream_;
+};
 
-  void ReopenHandlesInDeferredScope();
+class AsyncStreamingProcessor final : public StreamingProcessor {
+ public:
+  explicit AsyncStreamingProcessor(AsyncCompileJob* job);
 
-  void AsyncCompileFailed(ErrorThrower& thrower);
+  bool ProcessModuleHeader(Vector<const uint8_t> bytes,
+                           uint32_t offset) override;
 
-  void AsyncCompileSucceeded(Handle<Object> result);
+  bool ProcessSection(SectionCode section_code, Vector<const uint8_t> bytes,
+                      uint32_t offset) override;
 
-  template <typename Task, typename... Args>
-  void DoSync(Args&&... args);
+  bool ProcessCodeSectionHeader(size_t functions_count,
+                                uint32_t offset) override;
 
-  void StartForegroundTask();
+  bool ProcessFunctionBody(Vector<const uint8_t> bytes,
+                           uint32_t offset) override;
 
-  void StartBackgroundTask();
+  void OnFinishedChunk() override;
 
-  template <typename Task, typename... Args>
-  void DoAsync(Args&&... args);
+  void OnFinishedStream(std::unique_ptr<uint8_t[]> bytes,
+                        size_t length) override;
+
+  void OnError(DecodeResult result) override;
+
+  void OnAbort() override;
+
+ private:
+  // Finishes the AsyncCOmpileJob with an error.
+  void FinishAsyncCompileJobWithError(ResultBase result);
+
+  ModuleDecoder decoder_;
+  AsyncCompileJob* job_;
+  std::unique_ptr<ModuleCompiler::CompilationUnitBuilder>
+      compilation_unit_builder_;
+  uint32_t next_function_ = 0;
 };
 
 }  // namespace wasm

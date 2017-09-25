@@ -105,7 +105,7 @@ static bool supportsSTFLE() {
   static uint32_t auxv_hwcap = 0;
 
   if (!read_tried) {
-    // Open the AUXV (auxilliary vector) psuedo-file
+    // Open the AUXV (auxiliary vector) pseudo-file
     int fd = open("/proc/self/auxv", O_RDONLY);
 
     read_tried = true;
@@ -270,35 +270,22 @@ bool RelocInfo::IsCodedSpecially() {
 
 bool RelocInfo::IsInConstantPool() { return false; }
 
-Address RelocInfo::wasm_memory_reference() {
-  DCHECK(IsWasmMemoryReference(rmode_));
+Address RelocInfo::embedded_address() const {
   return Assembler::target_address_at(pc_, host_);
 }
 
-uint32_t RelocInfo::wasm_memory_size_reference() {
-  DCHECK(IsWasmMemorySizeReference(rmode_));
+uint32_t RelocInfo::embedded_size() const {
   return static_cast<uint32_t>(
       reinterpret_cast<intptr_t>(Assembler::target_address_at(pc_, host_)));
 }
 
-Address RelocInfo::wasm_global_reference() {
-  DCHECK(IsWasmGlobalReference(rmode_));
-  return Assembler::target_address_at(pc_, host_);
-}
-
-uint32_t RelocInfo::wasm_function_table_size_reference() {
-  DCHECK(IsWasmFunctionTableSizeReference(rmode_));
-  return static_cast<uint32_t>(
-      reinterpret_cast<intptr_t>(Assembler::target_address_at(pc_, host_)));
-}
-
-void RelocInfo::unchecked_update_wasm_memory_reference(
-    Isolate* isolate, Address address, ICacheFlushMode flush_mode) {
+void RelocInfo::set_embedded_address(Isolate* isolate, Address address,
+                                     ICacheFlushMode flush_mode) {
   Assembler::set_target_address_at(isolate, pc_, host_, address, flush_mode);
 }
 
-void RelocInfo::unchecked_update_wasm_size(Isolate* isolate, uint32_t size,
-                                           ICacheFlushMode flush_mode) {
+void RelocInfo::set_embedded_size(Isolate* isolate, uint32_t size,
+                                  ICacheFlushMode flush_mode) {
   Assembler::set_target_address_at(isolate, pc_, host_,
                                    reinterpret_cast<Address>(size), flush_mode);
 }
@@ -323,17 +310,11 @@ Operand Operand::EmbeddedNumber(double value) {
   return result;
 }
 
-MemOperand::MemOperand(Register rn, int32_t offset) {
-  baseRegister = rn;
-  indexRegister = r0;
-  offset_ = offset;
-}
+MemOperand::MemOperand(Register rn, int32_t offset)
+    : baseRegister(rn), indexRegister(r0), offset_(offset) {}
 
-MemOperand::MemOperand(Register rx, Register rb, int32_t offset) {
-  baseRegister = rb;
-  indexRegister = rx;
-  offset_ = offset;
-}
+MemOperand::MemOperand(Register rx, Register rb, int32_t offset)
+    : baseRegister(rb), indexRegister(rx), offset_(offset) {}
 
 void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
   for (auto& request : heap_object_requests_) {
@@ -362,9 +343,9 @@ void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
 // Specific instructions, constants, and masks.
 
 Assembler::Assembler(IsolateData isolate_data, void* buffer, int buffer_size)
-    : AssemblerBase(isolate_data, buffer, buffer_size),
-      code_targets_(100) {
+    : AssemblerBase(isolate_data, buffer, buffer_size) {
   reloc_info_writer.Reposition(buffer_ + buffer_size_, pc_);
+  code_targets_.reserve(100);
 
   last_bound_pos_ = 0;
   relocations_.reserve(128);
@@ -1472,7 +1453,7 @@ void Assembler::risbgn(Register dst, Register src, const Operand& startBit,
 // ---------------------------
 // Move Character Instructions
 // ---------------------------
-// Move charactor - mem to mem operation
+// Move character - mem to mem operation
 void Assembler::mvc(const MemOperand& opnd1, const MemOperand& opnd2,
                     uint32_t length) {
   ss_form(MVC, length - 1, opnd1.getBaseRegister(), opnd1.getDisplacement(),
@@ -1649,7 +1630,7 @@ void Assembler::EnsureSpaceFor(int space_needed) {
 
 // Rotate Left Single Logical (32)
 void Assembler::rll(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(RLL, r1, r3, opnd, 0);
 }
 
@@ -1666,7 +1647,7 @@ void Assembler::rll(Register r1, Register r3, Register r2,
 
 // Rotate Left Single Logical (64)
 void Assembler::rllg(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(RLLG, r1, r3, opnd, 0);
 }
 
@@ -1683,7 +1664,7 @@ void Assembler::rllg(Register r1, Register r3, Register r2,
 
 // Shift Left Single Logical (32)
 void Assembler::sll(Register r1, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rs_form(SLL, r1, r0, opnd, 0);
 }
 
@@ -1694,7 +1675,7 @@ void Assembler::sll(Register r1, const Operand& opnd) {
 
 // Shift Left Single Logical (32)
 void Assembler::sllk(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(SLLK, r1, r3, opnd, 0);
 }
 
@@ -1705,7 +1686,7 @@ void Assembler::sllk(Register r1, Register r3, const Operand& opnd) {
 
 // Shift Left Single Logical (64)
 void Assembler::sllg(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(SLLG, r1, r3, opnd, 0);
 }
 
@@ -1722,7 +1703,7 @@ void Assembler::sldl(Register r1, Register b2, const Operand& opnd) {
 
 // Shift Right Single Logical (32)
 void Assembler::srl(Register r1, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rs_form(SRL, r1, r0, opnd, 0);
 }
 
@@ -1745,7 +1726,7 @@ void Assembler::srl(Register r1, const Operand& opnd) {
 
 // Shift Right Single Logical (32)
 void Assembler::srlk(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(SRLK, r1, r3, opnd, 0);
 }
 
@@ -1756,7 +1737,7 @@ void Assembler::srlk(Register r1, Register r3, const Operand& opnd) {
 
 // Shift Right Single Logical (64)
 void Assembler::srlg(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(SRLG, r1, r3, opnd, 0);
 }
 
@@ -1767,7 +1748,7 @@ void Assembler::srlg(Register r1, Register r3, const Operand& opnd) {
 
 // Shift Left Single (32)
 void Assembler::sla(Register r1, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rs_form(SLA, r1, r0, opnd, 0);
 }
 
@@ -1778,7 +1759,7 @@ void Assembler::sla(Register r1, const Operand& opnd) {
 
 // Shift Left Single (32)
 void Assembler::slak(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(SLAK, r1, r3, opnd, 0);
 }
 
@@ -1789,7 +1770,7 @@ void Assembler::slak(Register r1, Register r3, const Operand& opnd) {
 
 // Shift Left Single (64)
 void Assembler::slag(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(SLAG, r1, r3, opnd, 0);
 }
 
@@ -1800,7 +1781,7 @@ void Assembler::slag(Register r1, Register r3, const Operand& opnd) {
 
 // Shift Right Single (32)
 void Assembler::sra(Register r1, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rs_form(SRA, r1, r0, opnd, 0);
 }
 
@@ -1811,7 +1792,7 @@ void Assembler::sra(Register r1, const Operand& opnd) {
 
 // Shift Right Single (32)
 void Assembler::srak(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(SRAK, r1, r3, opnd, 0);
 }
 
@@ -1822,7 +1803,7 @@ void Assembler::srak(Register r1, Register r3, const Operand& opnd) {
 
 // Shift Right Single (64)
 void Assembler::srag(Register r1, Register r3, Register opnd) {
-  DCHECK(!opnd.is(r0));
+  DCHECK(opnd != r0);
   rsy_form(SRAG, r1, r3, opnd, 0);
 }
 

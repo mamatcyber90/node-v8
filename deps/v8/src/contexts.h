@@ -43,7 +43,6 @@ enum ContextLookupFlags {
     async_function_promise_release)                                         \
   V(IS_ARRAYLIKE, JSFunction, is_arraylike)                                 \
   V(GENERATOR_NEXT_INTERNAL, JSFunction, generator_next_internal)           \
-  V(GET_TEMPLATE_CALL_SITE_INDEX, JSFunction, get_template_call_site)       \
   V(MAKE_ERROR_INDEX, JSFunction, make_error)                               \
   V(MAKE_RANGE_ERROR_INDEX, JSFunction, make_range_error)                   \
   V(MAKE_SYNTAX_ERROR_INDEX, JSFunction, make_syntax_error)                 \
@@ -52,7 +51,6 @@ enum ContextLookupFlags {
   V(OBJECT_CREATE, JSFunction, object_create)                               \
   V(OBJECT_DEFINE_PROPERTIES, JSFunction, object_define_properties)         \
   V(OBJECT_DEFINE_PROPERTY, JSFunction, object_define_property)             \
-  V(OBJECT_FREEZE, JSFunction, object_freeze)                               \
   V(OBJECT_GET_PROTOTYPE_OF, JSFunction, object_get_prototype_of)           \
   V(OBJECT_IS_EXTENSIBLE, JSFunction, object_is_extensible)                 \
   V(OBJECT_IS_FROZEN, JSFunction, object_is_frozen)                         \
@@ -217,7 +215,16 @@ enum ContextLookupFlags {
     async_generator_await_reject_shared_fun)                                   \
   V(ASYNC_GENERATOR_AWAIT_RESOLVE_SHARED_FUN, SharedFunctionInfo,              \
     async_generator_await_resolve_shared_fun)                                  \
+  V(ASYNC_GENERATOR_YIELD_RESOLVE_SHARED_FUN, SharedFunctionInfo,              \
+    async_generator_yield_resolve_shared_fun)                                  \
+  V(ASYNC_GENERATOR_RETURN_RESOLVE_SHARED_FUN, SharedFunctionInfo,             \
+    async_generator_return_resolve_shared_fun)                                 \
+  V(ASYNC_GENERATOR_RETURN_CLOSED_RESOLVE_SHARED_FUN, SharedFunctionInfo,      \
+    async_generator_return_closed_resolve_shared_fun)                          \
+  V(ASYNC_GENERATOR_RETURN_CLOSED_REJECT_SHARED_FUN, SharedFunctionInfo,       \
+    async_generator_return_closed_reject_shared_fun)                           \
   V(ATOMICS_OBJECT, JSObject, atomics_object)                                  \
+  V(BIGINT_FUNCTION_INDEX, JSFunction, bigint_function)                        \
   V(BOOLEAN_FUNCTION_INDEX, JSFunction, boolean_function)                      \
   V(BOUND_FUNCTION_WITH_CONSTRUCTOR_MAP_INDEX, Map,                            \
     bound_function_with_constructor_map)                                       \
@@ -228,7 +235,6 @@ enum ContextLookupFlags {
   V(CALL_AS_FUNCTION_DELEGATE_INDEX, JSFunction, call_as_function_delegate)    \
   V(CALLSITE_FUNCTION_INDEX, JSFunction, callsite_function)                    \
   V(CONTEXT_EXTENSION_FUNCTION_INDEX, JSFunction, context_extension_function)  \
-  V(CURRENT_MODULE_INDEX, Module, current_module)                              \
   V(DATA_PROPERTY_DESCRIPTOR_MAP_INDEX, Map, data_property_descriptor_map)     \
   V(DATA_VIEW_FUN_INDEX, JSFunction, data_view_fun)                            \
   V(DATE_FUNCTION_INDEX, JSFunction, date_function)                            \
@@ -270,6 +276,7 @@ enum ContextLookupFlags {
   V(INTL_NUMBER_FORMAT_FUNCTION_INDEX, JSFunction,                             \
     intl_number_format_function)                                               \
   V(INTL_COLLATOR_FUNCTION_INDEX, JSFunction, intl_collator_function)          \
+  V(INTL_PLURAL_RULES_FUNCTION_INDEX, JSFunction, intl_plural_rules_function)  \
   V(INTL_V8_BREAK_ITERATOR_FUNCTION_INDEX, JSFunction,                         \
     intl_v8_break_iterator_function)                                           \
   V(JS_ARRAY_PACKED_SMI_ELEMENTS_MAP_INDEX, Map,                               \
@@ -394,6 +401,7 @@ enum ContextLookupFlags {
   V(WASM_MEMORY_CONSTRUCTOR_INDEX, JSFunction, wasm_memory_constructor)        \
   V(WASM_MODULE_CONSTRUCTOR_INDEX, JSFunction, wasm_module_constructor)        \
   V(WASM_TABLE_CONSTRUCTOR_INDEX, JSFunction, wasm_table_constructor)          \
+  V(TEMPLATE_MAP_INDEX, HeapObject, template_map)                              \
   V(TYPED_ARRAY_FUN_INDEX, JSFunction, typed_array_function)                   \
   V(TYPED_ARRAY_PROTOTYPE_INDEX, JSObject, typed_array_prototype)              \
   V(UINT16_ARRAY_FUN_INDEX, JSFunction, uint16_array_fun)                      \
@@ -533,14 +541,13 @@ class Context: public FixedArray {
 
     // Properties from here are treated as weak references by the full GC.
     // Scavenge treats them as strong references.
-    OPTIMIZED_FUNCTIONS_LIST,  // Weak.
-    OPTIMIZED_CODE_LIST,       // Weak.
-    DEOPTIMIZED_CODE_LIST,     // Weak.
-    NEXT_CONTEXT_LINK,         // Weak.
+    OPTIMIZED_CODE_LIST,    // Weak.
+    DEOPTIMIZED_CODE_LIST,  // Weak.
+    NEXT_CONTEXT_LINK,      // Weak.
 
     // Total number of slots.
     NATIVE_CONTEXT_SLOTS,
-    FIRST_WEAK_SLOT = OPTIMIZED_FUNCTIONS_LIST,
+    FIRST_WEAK_SLOT = OPTIMIZED_CODE_LIST,
     FIRST_JS_ARRAY_MAP_SLOT = JS_ARRAY_PACKED_SMI_ELEMENTS_MAP_INDEX,
 
     MIN_CONTEXT_SLOTS = GLOBAL_PROXY_INDEX,
@@ -601,29 +608,23 @@ class Context: public FixedArray {
   Context* script_context();
 
   // Compute the native context.
-  inline Context* native_context();
+  inline Context* native_context() const;
   inline void set_native_context(Context* context);
 
   // Predicates for context types.  IsNativeContext is also defined on Object
   // because we frequently have to know if arbitrary objects are natives
   // contexts.
-  inline bool IsNativeContext();
-  inline bool IsFunctionContext();
-  inline bool IsCatchContext();
-  inline bool IsWithContext();
-  inline bool IsDebugEvaluateContext();
-  inline bool IsBlockContext();
-  inline bool IsModuleContext();
-  inline bool IsEvalContext();
-  inline bool IsScriptContext();
+  inline bool IsNativeContext() const;
+  inline bool IsFunctionContext() const;
+  inline bool IsCatchContext() const;
+  inline bool IsWithContext() const;
+  inline bool IsDebugEvaluateContext() const;
+  inline bool IsBlockContext() const;
+  inline bool IsModuleContext() const;
+  inline bool IsEvalContext() const;
+  inline bool IsScriptContext() const;
 
-  inline bool HasSameSecurityTokenAs(Context* that);
-
-  // A native context holds a list of all functions with optimized code.
-  void AddOptimizedFunction(JSFunction* function);
-  void RemoveOptimizedFunction(JSFunction* function);
-  void SetOptimizedFunctionsListHead(Object* head);
-  Object* OptimizedFunctionsListHead();
+  inline bool HasSameSecurityTokenAs(Context* that) const;
 
   // The native context also stores a list of all optimized code and a
   // list of all deoptimized code, which are needed by the deoptimizer.
@@ -641,8 +642,8 @@ class Context: public FixedArray {
 
 #define NATIVE_CONTEXT_FIELD_ACCESSORS(index, type, name) \
   inline void set_##name(type* value);                    \
-  inline bool is_##name(type* value);                     \
-  inline type* name();
+  inline bool is_##name(type* value) const;               \
+  inline type* name() const;
   NATIVE_CONTEXT_FIELDS(NATIVE_CONTEXT_FIELD_ACCESSORS)
 #undef NATIVE_CONTEXT_FIELD_ACCESSORS
 
@@ -670,7 +671,8 @@ class Context: public FixedArray {
   Handle<Object> Lookup(Handle<String> name, ContextLookupFlags flags,
                         int* index, PropertyAttributes* attributes,
                         InitializationFlag* init_flag,
-                        VariableMode* variable_mode);
+                        VariableMode* variable_mode,
+                        bool* is_sloppy_function_name = nullptr);
 
   // Code generation support.
   static int SlotOffset(int index) {
@@ -685,6 +687,8 @@ class Context: public FixedArray {
     DCHECK(IsFastElementsKind(elements_kind));
     return elements_kind + FIRST_JS_ARRAY_MAP_SLOT;
   }
+
+  inline Map* GetInitialJSArrayMap(ElementsKind kind) const;
 
   static const int kSize = kHeaderSize + NATIVE_CONTEXT_SLOTS * kPointerSize;
   static const int kNotFound = -1;
